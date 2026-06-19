@@ -1,0 +1,12 @@
+{
+  "_meta": {
+    "description": "CSS selectors for fsciences.univ-setif.dz notice listings",
+    "validated": false,
+    "last_updated": "2026-06-19"
+  },
+  "notice_container": "div.notice-list > article.notice-item, div.entry, div.item-list > div.item",
+  "title": "h2 a, h3 a, .notice-title a, a.title",
+  "link": "h2 a[href], h3 a[href], .notice-title a[href], a.title[href]",
+  "date": "time, .date, .notice-date, span.date",
+  "content_area": "div.notice-content, article.content, .entry-content, .post-content"
+}

@@ -1,0 +1,7 @@
+playwright>=1.40,<2.0
+lxml>=4.9,<6.0
+httpx>=0.25,<1.0
+apscheduler>=3.10,<4.0
+pyyaml>=6.0,<7.0
+python-dotenv>=1.0,<2.0
+tenacity>=8.2,<9.0

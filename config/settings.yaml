@@ -1,0 +1,34 @@
+poll:
+  default_interval_minutes: 30
+  fast_interval_minutes: 5
+  fast_trigger_count: 1
+
+retry:
+  max_attempts: 3
+  backoff_multiplier: 2
+  backoff_min_seconds: 4
+  backoff_max_seconds: 60
+
+telegram:
+  message_max_length: 4000
+
+heartbeat:
+  interval_hours: 6
+
+browser:
+  timeout_seconds: 30
+  random_delay_min: 2
+  random_delay_max: 5
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+logging:
+  max_bytes: 5242880
+  backup_count: 3
+  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+database:
+  path: /app/data/notices.db
+  backup_dir: /app/data/backup
+  backup_retention_days: 7

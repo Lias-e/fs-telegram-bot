@@ -1,0 +1,15 @@
+services:
+  broadcaster:
+    build: .
+    container_name: fs-telegram-bot
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3; sqlite3.connect('/app/data/notices.db').execute('SELECT 1')"]
+      interval: 6h
+      timeout: 10s
+      retries: 3
+      start_period: 30s
