@@ -1,33 +1,35 @@
 # University Broadcaster Telegram Bot
 
-Autonomous pipeline that polls the **University of Setif 1 – Faculty of Sciences** website for new administrative notices (PDFs, announcements), filters duplicates using SHA256 content hashing, and broadcasts them instantly to a public Telegram channel.
+Autonomous pipeline that polls the **University of Setif 1 – Faculty of Sciences** website (main page + 6 department sub-pages) for new administrative notices and broadcasts them instantly to a Telegram channel with duplicate detection and department-level filtering.
 
 ## Features
 
-- **Autonomous monitoring** – polls `fsciences.univ-setif.dz` every 30 minutes (adaptive to 5 min for recent updates)
-- **Duplicate prevention** – SQLite database with SHA256 content hashing
-- **Instant broadcasting** – pushes to Telegram channel with retry + exponential backoff
+- **Multi-target monitoring** – scrapes the main page + 6 departments (CS, Math, Physics, Chemistry, MI, SM)
+- **Adaptive polling** – checks every 5 min if new notices were found, otherwise every 30 min
+- **Duplicate prevention** – SQLite database with SHA256 hashing of `url + title`
+- **Multi-chat broadcasting** – sends to the default channel + all subscribed chats/groups
+- **Admin-only commands** – only the configured admin user can control the bot
+- **Department filtering** – enable/disable individual departments via `/subscribe` / `/unsubscribe`
 - **JS-ready parsing** – uses Playwright + lxml to handle dynamic content
-- **Zero cost** – designed for self-hosting on a local DIY Linux server
-- **Resilient** – health checks, file rotation logging, dynamic selector config
+- **Resilient** – health checks, file rotation logging, dynamic selector config, tenacity retry
+- **Zero cost** – designed for self-hosting on a local Linux server
 
 ## Architecture
 
 ```
-[University Website] → [Playwright Scraper] → [SQLite State] → [httpx + Telegram API] → [Student Channel]
-         ↑                    ↑                    ↑                    ↑
-    (30 min adaptive)   (JS-ready parsing)   (hash + timestamps)   (retry 3x)
+[University Website (7 URLs)]
+         ↓
+[Playwright Scraper]  →  lxml parsing →  extract date + title + link
+         ↓
+[SQLite State]
+  ├─ notices table (SHA256 dedup)
+  ├─ subscriptions table (chat IDs)
+  └─ settings table (disabled departments)
+         ↓
+[httpx + Telegram API]  →  send to all subscribed chats (3s delay between)
+         ↑
+[Command Handler]  ←  getUpdates polling every 2s
 ```
-
-### Key Components
-
-| Component | Choice |
-|-----------|--------|
-| Parsing | Playwright + lxml |
-| Storage | SQLite (notices table with SHA256 hashes) |
-| Scheduler | APScheduler |
-| HTTP | httpx (async-ready, built-in retry) |
-| Config | YAML + environment variables |
 
 ## Prerequisites
 
@@ -45,7 +47,7 @@ git clone <repo-url> && cd fs-telegram-bot
 cp .env.example .env
 ```
 
-Edit `.env` with your Telegram credentials and target URL.
+Edit `.env` with your Telegram credentials.
 
 ### 2. Run with Docker (recommended)
 
@@ -59,7 +61,7 @@ docker compose up --build -d
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
-python src/main.py
+PYTHONPATH=/path/to/project python -m src.main
 ```
 
 ## Environment Variables
@@ -68,9 +70,21 @@ python src/main.py
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from BotFather |
 | `TELEGRAM_CHANNEL_ID` | Yes | Target channel ID (e.g. `@channel` or `-1001234567890`) |
-| `TARGET_URL` | No | Defaults to `https://fsciences.univ-setif.dz` |
+| `ADMIN_TELEGRAM_ID` | Yes | Your Telegram user ID (all commands restricted to this ID) |
 | `LOG_LEVEL` | No | `INFO` (default), `DEBUG`, `WARNING` |
-| `POLL_INTERVAL` | No | Default polling interval in minutes (default: `30`) |
+
+## Commands (admin only)
+
+Send these in a private chat with the bot:
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Subscribe the current chat to announcements |
+| `/stop` | Unsubscribe the current chat |
+| `/status` | Show total notice count and active department count |
+| `/departments` | List all departments with enable/disable status |
+| `/subscribe <name>` | Enable a department (e.g. `/subscribe Informatique`) |
+| `/unsubscribe <name>` | Disable a department (e.g. `/unsubscribe Maths`) |
 
 ## Project Structure
 
@@ -78,16 +92,17 @@ python src/main.py
 fs-telegram-bot/
 ├── src/
 │   ├── main.py              # Entry point – scheduler orchestration
-│   ├── scraper.py           # Playwright-based page scraper
+│   ├── scraper.py           # Playwright-based page scraper (7 targets)
 │   ├── broadcaster.py       # Telegram messaging with retry logic
-│   ├── database.py          # SQLite operations (init, insert, lookup)
+│   ├── commands.py          # Telegram command handler (getUpdates polling)
+│   ├── database.py          # SQLite operations (notices, subscriptions, settings)
 │   ├── config.py            # YAML + env config loader
 │   ├── heartbeat.py         # Periodic health-check reporter
-│   └── utils.py             # Helpers (text splitting, hashing)
+│   └── utils.py             # Date extraction, hashing, formatting
 ├── config/
-│   ├── selectors.json       # CSS/XPath selectors for target site
-│   └── settings.yaml        # Global application settings
-├── Dockerfile               # Multi-stage build
+│   ├── selectors.json       # CSS selectors for the target site
+│   └── settings.yaml        # Global application settings (target URLs, intervals)
+├── Dockerfile               # Multi-stage build with Playwright
 ├── docker-compose.yml       # Service orchestration
 ├── requirements.txt         # Python dependencies
 ├── .env.example             # Environment variable template
