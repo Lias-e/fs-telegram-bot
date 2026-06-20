@@ -54,9 +54,9 @@ def init_browser(settings):
 
 
 def poll_job(scraper, db, broadcaster, settings):
-    url = get_env("TARGET_URL", "https://fsciences.univ-setif.dz")
+    targets = settings["poll"].get("targets", [get_env("TARGET_URL", "https://fsciences.univ-setif.dz")])
     try:
-        notices = scraper.scrape(url)
+        notices = scraper.scrape_all(targets)
     except Exception as e:
         logger.error("Poll job failed: %s", e)
         return 30
@@ -70,6 +70,9 @@ def poll_job(scraper, db, broadcaster, settings):
         db.insert_notice(notice_id, notice["url"], notice["title"], hash_digest)
         broadcaster.send_notice(notice["title"], notice["url"], notice["date"])
         new_count += 1
+        if new_count > 0:
+            import time
+            time.sleep(3)
 
     logger.info("Poll complete: %d new notices found", new_count)
 
@@ -123,9 +126,9 @@ def main():
     )
     heartbeat = Heartbeat(broadcaster, _db)
 
-    url = get_env("TARGET_URL", "https://fsciences.univ-setif.dz")
+    targets = settings["poll"].get("targets", [get_env("TARGET_URL", "https://fsciences.univ-setif.dz")])
     try:
-        sample = scraper.scrape(url)
+        sample = scraper.scrape_all(targets)
         if not sample:
             logger.warning("Selector validation: zero notices found on startup")
             broadcaster.send("⚠️ *Selector Validation Warning*\n\nZero notices found on startup. The site structure may have changed – check `config/selectors.json`.")
@@ -169,6 +172,8 @@ def main():
 
     _scheduler.start()
     logger.info("Bot started. Polling every %d min.", settings["poll"]["default_interval_minutes"])
+
+    run_poll()
 
     try:
         from time import sleep

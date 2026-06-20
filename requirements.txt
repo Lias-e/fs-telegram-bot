@@ -1,5 +1,6 @@
 playwright>=1.40,<2.0
 lxml>=4.9,<6.0
+cssselect>=1.2,<2.0
 httpx>=0.25,<1.0
 apscheduler>=3.10,<4.0
 pyyaml>=6.0,<7.0

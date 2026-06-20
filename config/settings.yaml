@@ -2,6 +2,14 @@ poll:
   default_interval_minutes: 30
   fast_interval_minutes: 5
   fast_trigger_count: 1
+  targets:
+    - https://fsciences.univ-setif.dz
+    - https://fsciences.univ-setif.dz/sites_departements/informatique
+    - https://fsciences.univ-setif.dz/sites_departements/maths
+    - https://fsciences.univ-setif.dz/sites_departements/physique
+    - https://fsciences.univ-setif.dz/sites_departements/chimie
+    - https://fsciences.univ-setif.dz/sites_departements/mi
+    - https://fsciences.univ-setif.dz/sites_departements/sm
 
 retry:
   max_attempts: 3

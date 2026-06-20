@@ -38,6 +38,9 @@ class Broadcaster:
         parts = split_text(text, self.max_length)
         for i, part in enumerate(parts):
             try:
+                import time
+                if i > 0:
+                    time.sleep(3)
                 self._post_message(part)
                 logger.info("Sent message part %d/%d", i + 1, len(parts))
             except Exception as e:

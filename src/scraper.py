@@ -80,3 +80,10 @@ class Scraper:
         if not html:
             return []
         return self.parse_notices(html, url)
+
+    def scrape_all(self, urls):
+        all_notices = []
+        for url in urls:
+            notices = self.scrape(url)
+            all_notices.extend(notices)
+        return all_notices
