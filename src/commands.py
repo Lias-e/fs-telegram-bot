@@ -44,6 +44,9 @@ class CommandHandler:
         if not text or not chat_id:
             return
 
+        if not self._is_admin(user_id):
+            return
+
         if text == "/start":
             self.db.add_subscription(chat_id, msg.get("chat", {}).get("title", ""))
             self._send(chat_id, "✅ This chat is now subscribed to faculty announcements.\n\nUse /stop to unsubscribe.")
@@ -66,7 +69,7 @@ class CommandHandler:
             self._send(chat_id, "\n".join(lines))
             return
 
-        if text.startswith("/departments") and self._is_admin(user_id):
+        if text.startswith("/departments"):
             disabled_raw = self.db.get_setting("disabled_targets", "")
             disabled = set(disabled_raw.split(",")) if disabled_raw else set()
             lines = ["*Departments:*"]
@@ -78,7 +81,7 @@ class CommandHandler:
             self._send(chat_id, "\n".join(lines))
             return
 
-        if text.startswith("/subscribe") and self._is_admin(user_id):
+        if text.startswith("/subscribe"):
             parts = text.split(maxsplit=1)
             if len(parts) < 2:
                 self._send(chat_id, "Usage: `/subscribe Computer Science`")
@@ -99,7 +102,7 @@ class CommandHandler:
             self._send(chat_id, f"✅ Enabled: {DEPARTMENT_LABELS[matched]}")
             return
 
-        if text.startswith("/unsubscribe") and self._is_admin(user_id):
+        if text.startswith("/unsubscribe"):
             parts = text.split(maxsplit=1)
             if len(parts) < 2:
                 self._send(chat_id, "Usage: `/unsubscribe Computer Science`")
