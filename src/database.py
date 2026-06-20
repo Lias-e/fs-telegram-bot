@@ -1,6 +1,5 @@
 import logging
 import sqlite3
-import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -16,9 +15,22 @@ CREATE TABLE IF NOT EXISTS notices (
 )
 """
 
-CREATE_INDEX_HASH = """
-CREATE INDEX IF NOT EXISTS idx_notices_hash ON notices(hash)
+CREATE_SUBSCRIPTIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS subscriptions (
+    chat_id TEXT PRIMARY KEY,
+    chat_title TEXT,
+    subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
 """
+
+CREATE_SETTINGS_TABLE = """
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)
+"""
+
+CREATE_INDEX_HASH = "CREATE INDEX IF NOT EXISTS idx_notices_hash ON notices(hash)"
 
 
 class Database:
@@ -31,6 +43,8 @@ class Database:
 
     def _init_schema(self):
         self.conn.execute(CREATE_NOTICES_TABLE)
+        self.conn.execute(CREATE_SUBSCRIPTIONS_TABLE)
+        self.conn.execute(CREATE_SETTINGS_TABLE)
         self.conn.execute(CREATE_INDEX_HASH)
         self.conn.commit()
 
@@ -67,6 +81,41 @@ class Database:
             return True
         except sqlite3.Error:
             return False
+
+    def add_subscription(self, chat_id, chat_title=""):
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO subscriptions (chat_id, chat_title) VALUES (?, ?)",
+            (chat_id, chat_title),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def remove_subscription(self, chat_id):
+        cur = self.conn.execute("DELETE FROM subscriptions WHERE chat_id = ?", (chat_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_subscriptions(self):
+        cur = self.conn.execute("SELECT chat_id, chat_title FROM subscriptions")
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_setting(self, key, default=None):
+        cur = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key, value):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value)
+        )
+        self.conn.commit()
+
+    def get_enabled_targets(self, all_targets):
+        disabled = self.get_setting("disabled_targets", "")
+        if not disabled:
+            return all_targets
+        disabled_list = set(disabled.split(","))
+        return [t for t in all_targets if t not in disabled_list]
 
     def backup(self, backup_dir, retention_days=7):
         backup_path = Path(backup_dir)

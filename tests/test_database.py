@@ -43,3 +43,37 @@ def test_get_recent():
         assert len(recent) == 2
         assert recent[0]["title"] == "B"
         db.close()
+
+
+def test_subscriptions():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _make_db(tmp)
+        assert db.add_subscription("-100123", "Test Chat")
+        assert not db.add_subscription("-100123", "Test Chat")
+        subs = db.get_subscriptions()
+        assert len(subs) == 1
+        assert subs[0]["chat_id"] == "-100123"
+        assert db.remove_subscription("-100123")
+        assert len(db.get_subscriptions()) == 0
+        db.close()
+
+
+def test_settings():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _make_db(tmp)
+        assert db.get_setting("foo") is None
+        db.set_setting("foo", "bar")
+        assert db.get_setting("foo") == "bar"
+        db.set_setting("foo", "baz")
+        assert db.get_setting("foo") == "baz"
+        db.close()
+
+
+def test_enabled_targets():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _make_db(tmp)
+        targets = ["a", "b", "c"]
+        assert db.get_enabled_targets(targets) == ["a", "b", "c"]
+        db.set_setting("disabled_targets", "b")
+        assert db.get_enabled_targets(targets) == ["a", "c"]
+        db.close()

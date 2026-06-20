@@ -3,17 +3,20 @@ import logging.handlers
 import os
 import signal
 import sys
+import threading
+import time
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from src.broadcaster import Broadcaster
+from src.commands import CommandHandler
 from src.config import BASE_DIR, get_env, load_selectors, load_settings, validate_env
 from src.database import Database
 from src.heartbeat import Heartbeat
 from src.scraper import Scraper
-from src.utils import sha256_hash
+from src.utils import extract_date, format_notice_with_seen, sha256_hash
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +57,19 @@ def init_browser(settings):
 
 
 def poll_job(scraper, db, broadcaster, settings):
-    targets = settings["poll"].get("targets", [get_env("TARGET_URL", "https://fsciences.univ-setif.dz")])
+    all_targets = settings["poll"].get("targets", [get_env("TARGET_URL", "https://fsciences.univ-setif.dz")])
+    targets = db.get_enabled_targets(all_targets)
     try:
         notices = scraper.scrape_all(targets)
     except Exception as e:
         logger.error("Poll job failed: %s", e)
         return 30
+
+    subs = db.get_subscriptions()
+    chat_ids = [s["chat_id"] for s in subs]
+    default_chat = get_env("TELEGRAM_CHANNEL_ID")
+    if default_chat and default_chat not in chat_ids:
+        chat_ids.insert(0, default_chat)
 
     new_count = 0
     for notice in notices:
@@ -68,13 +78,14 @@ def poll_job(scraper, db, broadcaster, settings):
             continue
         notice_id = hash_digest[:16]
         db.insert_notice(notice_id, notice["url"], notice["title"], hash_digest)
-        broadcaster.send_notice(notice["title"], notice["url"], notice["date"])
+        date = extract_date(notice["title"] + " " + notice["date"])
+        text = format_notice_with_seen(notice["title"], notice["url"], date)
+        broadcaster.send(text, chat_ids=chat_ids)
         new_count += 1
         if new_count > 0:
-            import time
             time.sleep(3)
 
-    logger.info("Poll complete: %d new notices found", new_count)
+    logger.info("Poll complete: %d new notices found across %d chats", new_count, len(chat_ids))
 
     if new_count >= settings["poll"]["fast_trigger_count"]:
         return settings["poll"]["fast_interval_minutes"]
@@ -92,7 +103,14 @@ def backup_job(db, settings):
     )
 
 
+_signal_caught = False
+
+
 def signal_handler(signum, frame):
+    global _signal_caught
+    if _signal_caught:
+        return
+    _signal_caught = True
     logger.info("Received signal %s, shutting down...", signum)
     if _scheduler:
         _scheduler.shutdown(wait=False)
@@ -127,6 +145,7 @@ def main():
     heartbeat = Heartbeat(broadcaster, _db)
 
     targets = settings["poll"].get("targets", [get_env("TARGET_URL", "https://fsciences.univ-setif.dz")])
+
     try:
         sample = scraper.scrape_all(targets)
         if not sample:
@@ -134,6 +153,13 @@ def main():
             broadcaster.send("⚠️ *Selector Validation Warning*\n\nZero notices found on startup. The site structure may have changed – check `config/selectors.json`.")
     except Exception as e:
         logger.warning("Selector validation failed on startup: %s", e)
+
+    cmd_handler = CommandHandler(
+        get_env("TELEGRAM_BOT_TOKEN"), _db, targets,
+        admin_id=get_env("ADMIN_TELEGRAM_ID", None),
+    )
+    cmd_thread = threading.Thread(target=cmd_handler.run_forever, daemon=True)
+    cmd_thread.start()
 
     _scheduler = BackgroundScheduler()
 
@@ -174,14 +200,6 @@ def main():
     logger.info("Bot started. Polling every %d min.", settings["poll"]["default_interval_minutes"])
 
     run_poll()
-
-    try:
-        from time import sleep
-
-        while True:
-            sleep(1)
-    except KeyboardInterrupt:
-        signal_handler(None, None)
 
 
 if __name__ == "__main__":
