@@ -72,9 +72,11 @@ def poll_job(scraper, db, broadcaster, settings):
         chat_ids.insert(0, default_chat)
 
     new_count = 0
+    dup_count = 0
     for notice in notices:
         url = notice["url"]
         if db.is_duplicate(url):
+            dup_count += 1
             continue
         hash_digest = sha256_hash(url)
         db.insert_notice(url, notice["title"], hash_digest)
@@ -85,7 +87,7 @@ def poll_job(scraper, db, broadcaster, settings):
         if new_count > 0:
             time.sleep(3)
 
-    logger.info("Poll complete: %d new notices found across %d chats", new_count, len(chat_ids))
+    logger.info("Poll complete: %d new, %d duplicates across %d chats", new_count, dup_count, len(chat_ids))
 
     if new_count >= settings["poll"]["fast_trigger_count"]:
         return settings["poll"]["fast_interval_minutes"]
@@ -200,6 +202,10 @@ def main():
     logger.info("Bot started. Polling every %d min.", settings["poll"]["default_interval_minutes"])
 
     run_poll()
+
+    # Keep main thread alive — daemon threads (scheduler, command handler)
+    # would be killed on exit otherwise, causing the container to restart
+    threading.Event().wait()
 
 
 if __name__ == "__main__":
