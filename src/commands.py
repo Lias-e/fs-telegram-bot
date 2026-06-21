@@ -15,11 +15,23 @@ DEPARTMENT_LABELS = {
     "https://fsciences.univ-setif.dz/sites_departements/sm": "SM (Material Sci.)",
 }
 
+DISPLAY_CMDS = {
+    "/start": "🚀 Start",
+    "/stop": "⛔ Stop",
+    "/status": "📊 Status",
+    "/departments": "📋 Departments",
+    "/help": "❓ Help",
+    "/subscribe": "✅ Subscribe",
+    "/unsubscribe": "❌ Unsubscribe",
+}
+
+DISPLAY_TO_CMD = {v: k for k, v in DISPLAY_CMDS.items()}
+
 REPLY_KEYBOARD = {
     "keyboard": [
-        ["/status", "/departments", "/help"],
-        ["/subscribe", "/unsubscribe"],
-        ["/stop"],
+        [DISPLAY_CMDS["/status"], DISPLAY_CMDS["/departments"], DISPLAY_CMDS["/help"]],
+        [DISPLAY_CMDS["/subscribe"], DISPLAY_CMDS["/unsubscribe"]],
+        [DISPLAY_CMDS["/stop"]],
     ],
     "resize_keyboard": True,
 }
@@ -92,6 +104,8 @@ class CommandHandler:
         if not self._is_admin(user_id):
             return
 
+        text = DISPLAY_TO_CMD.get(text, text)
+
         if text == "/start":
             self.db.add_subscription(chat_id, msg.get("chat", {}).get("title", ""))
             self._send(
@@ -120,14 +134,13 @@ class CommandHandler:
 
         if text == "/help":
             lines = [
-                "*Available commands:*",
-                "/start — Subscribe this chat",
-                "/stop — Unsubscribe this chat",
-                "/status — Show stats",
-                "/departments — List departments",
-                "/subscribe — Toggle departments (buttons)",
-                "/unsubscribe <name> — Quick disable a department",
-                "/help — This message",
+                "*Commands:*",
+                f"{DISPLAY_CMDS['/start']} — Subscribe this chat",
+                f"{DISPLAY_CMDS['/stop']} — Unsubscribe this chat",
+                f"{DISPLAY_CMDS['/status']} — Stats & active departments",
+                f"{DISPLAY_CMDS['/departments']} — List all departments",
+                f"{DISPLAY_CMDS['/subscribe']} — Toggle departments",
+                f"{DISPLAY_CMDS['/help']} — This message",
             ]
             self._send(chat_id, "\n".join(lines))
             return
