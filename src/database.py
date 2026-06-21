@@ -7,8 +7,7 @@ logger = logging.getLogger(__name__)
 
 CREATE_NOTICES_TABLE = """
 CREATE TABLE IF NOT EXISTS notices (
-    id TEXT PRIMARY KEY,
-    url TEXT NOT NULL,
+    url TEXT PRIMARY KEY,
     title TEXT,
     hash TEXT NOT NULL,
     seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -30,7 +29,7 @@ CREATE TABLE IF NOT EXISTS settings (
 )
 """
 
-CREATE_INDEX_HASH = "CREATE INDEX IF NOT EXISTS idx_notices_hash ON notices(hash)"
+CREATE_INDEX_URL = "CREATE INDEX IF NOT EXISTS idx_notices_url ON notices(url)"
 
 
 class Database:
@@ -45,14 +44,14 @@ class Database:
         self.conn.execute(CREATE_NOTICES_TABLE)
         self.conn.execute(CREATE_SUBSCRIPTIONS_TABLE)
         self.conn.execute(CREATE_SETTINGS_TABLE)
-        self.conn.execute(CREATE_INDEX_HASH)
+        self.conn.execute(CREATE_INDEX_URL)
         self.conn.commit()
 
-    def insert_notice(self, notice_id, url, title, hash_digest):
+    def insert_notice(self, url, title, hash_digest):
         try:
             cur = self.conn.execute(
-                "INSERT OR IGNORE INTO notices (id, url, title, hash) VALUES (?, ?, ?, ?)",
-                (notice_id, url, title, hash_digest),
+                "INSERT OR IGNORE INTO notices (url, title, hash) VALUES (?, ?, ?)",
+                (url, title, hash_digest),
             )
             self.conn.commit()
             return cur.rowcount > 0
@@ -60,8 +59,8 @@ class Database:
             logger.error("DB insert failed: %s", e)
             return False
 
-    def is_duplicate(self, hash_digest):
-        cur = self.conn.execute("SELECT 1 FROM notices WHERE hash = ? LIMIT 1", (hash_digest,))
+    def is_duplicate(self, url):
+        cur = self.conn.execute("SELECT 1 FROM notices WHERE url = ? LIMIT 1", (url,))
         return cur.fetchone() is not None
 
     def get_recent(self, limit=5):

@@ -71,18 +71,13 @@ def poll_job(scraper, db, broadcaster, settings):
     if default_chat and default_chat not in chat_ids:
         chat_ids.insert(0, default_chat)
 
-    seen_urls = set()
     new_count = 0
     for notice in notices:
         url = notice["url"]
-        if url in seen_urls:
+        if db.is_duplicate(url):
             continue
-        seen_urls.add(url)
         hash_digest = sha256_hash(url)
-        if db.is_duplicate(hash_digest):
-            continue
-        notice_id = hash_digest[:16]
-        db.insert_notice(notice_id, notice["url"], notice["title"], hash_digest)
+        db.insert_notice(url, notice["title"], hash_digest)
         date = extract_date(notice["title"] + " " + notice["date"])
         text = format_notice_with_seen(notice["title"], notice["url"], date)
         broadcaster.send(text, chat_ids=chat_ids)

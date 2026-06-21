@@ -18,9 +18,9 @@ def test_init_db():
 def test_insert_and_deduplicate():
     with tempfile.TemporaryDirectory() as tmp:
         db = _make_db(tmp)
-        assert db.insert_notice("id1", "http://example.com/1", "Notice 1", "abc123")
+        assert db.insert_notice("http://example.com/1", "Notice 1", "abc123")
         assert db.count() == 1
-        assert not db.insert_notice("id1", "http://example.com/1", "Notice 1", "abc123")
+        assert not db.insert_notice("http://example.com/1", "Notice 1", "abc123")
         assert db.count() == 1
         db.close()
 
@@ -28,17 +28,17 @@ def test_insert_and_deduplicate():
 def test_is_duplicate():
     with tempfile.TemporaryDirectory() as tmp:
         db = _make_db(tmp)
-        assert not db.is_duplicate("nonexistent")
-        db.insert_notice("id2", "http://example.com/2", "Notice 2", "def456")
-        assert db.is_duplicate("def456")
+        assert not db.is_duplicate("http://example.com/new")
+        db.insert_notice("http://example.com/2", "Notice 2", "def456")
+        assert db.is_duplicate("http://example.com/2")
         db.close()
 
 
 def test_get_recent():
     with tempfile.TemporaryDirectory() as tmp:
         db = _make_db(tmp)
-        db.insert_notice("a", "http://a.com", "A", "aaa")
-        db.insert_notice("b", "http://b.com", "B", "bbb")
+        db.insert_notice("http://a.com", "A", "aaa")
+        db.insert_notice("http://b.com", "B", "bbb")
         recent = db.get_recent(2)
         assert len(recent) == 2
         assert recent[0]["title"] == "B"
