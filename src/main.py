@@ -56,11 +56,15 @@ def init_browser(settings):
     return p, browser
 
 
-def poll_job(scraper, db, broadcaster, settings):
+def poll_job(db, broadcaster, settings, selectors):
     all_targets = settings["poll"].get("targets", [get_env("TARGET_URL", "https://fsciences.univ-setif.dz")])
     targets = db.get_enabled_targets(all_targets)
     try:
-        notices = scraper.scrape_all(targets)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            scraper = Scraper(browser, selectors, settings)
+            notices = scraper.scrape_all(targets)
     except Exception as e:
         logger.error("Poll job failed: %s", e)
         return 30
@@ -166,7 +170,7 @@ def main():
     _scheduler = BackgroundScheduler()
 
     def run_poll():
-        interval = poll_job(scraper, _db, broadcaster, settings)
+        interval = poll_job(_db, broadcaster, settings, selectors)
         _scheduler.reschedule_job(
             "poll",
             trigger=IntervalTrigger(minutes=interval),
