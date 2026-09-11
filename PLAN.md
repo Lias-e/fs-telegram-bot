@@ -1,125 +1,139 @@
 # Implementation Plan
 
+Status: **Phases 1–4 and unit tests are done. Do not deploy until Phase 6 defects are fixed.**  
+Evidence: [`docs/RESEARCH-ISSUES.md`](docs/RESEARCH-ISSUES.md) — 22 findings (F01–F22) from code + Telegram Bot API + Playwright + Python sqlite3 + live HTML (2026-09-11).
+
+---
+
 ## Phase 1 – Project Scaffolding ✅
 
-- [x] **1.1 Create directory structure**
-  ```
-  src/
-  config/
-  data/
-  logs/
-  tests/
-  ```
+- [x] **1.1 Create directory structure** (`src/`, `config/`, `data/`, `logs/`, `tests/`)
 - [x] **1.2 Write `requirements.txt`**
-  - `playwright`, `lxml`, `httpx`, `apscheduler`, `pyyaml`, `python-dotenv`, `tenacity`
 - [x] **1.3 Write `.env.example`**
-  - `TELEGRAM_BOT_TOKEN=`, `TELEGRAM_CHANNEL_ID=`, `TARGET_URL=`, `LOG_LEVEL=`, `POLL_INTERVAL=`
 - [x] **1.4 Write `config/settings.yaml`**
-  - Default poll interval, retry counts, backoff base, user-agent strings, heartbeat interval
 - [x] **1.5 Write `config/selectors.json`**
-  - Site-specific CSS selectors for notice container, title, link, date
-  - Include a `_meta.validated` field (initially `false`)
 
-## Phase 2 – Core Modules ✅
+## Phase 2 – Core Modules ✅ (shipped; several behaviors diverge from this original spec — see Phase 6)
 
-- [x] **2.1 `src/config.py`**
-  - Load `settings.yaml` via `pyyaml`
-  - Overlay with environment variables (env wins)
-  - Load & return `selectors.json`
-  - Validate required env vars at startup (fail fast)
-- [x] **2.2 `src/database.py`**
-  - `init_db()` – create `notices` table with schema
-  - `insert_notice(id, url, title, hash)` – INSERT OR IGNORE
-  - `is_duplicate(hash)` – boolean check
-  - `get_recent(count)` – for heartbeat summary
-  - `backup()` – daily backups with retention pruning
-- [x] **2.3 `src/utils.py`**
-  - `sha256_hash(content)` – returns hex digest
-  - `split_text(text, max_length=4000)` – splits long messages for Telegram
-  - `format_notice(title, url, date)` – builds message string
-- [x] **2.4 `src/scraper.py`**
-  - `fetch_page(url)` – Playwright with random user-agent + 2–5s delay
-  - `parse_notices(html, selectors)` – lxml extraction
-  - `scrape()` – orchestrate fetch + parse; return list of notices
-- [x] **2.5 `src/broadcaster.py`**
-  - `send(text)` – POST via httpx with tenacity retry (3 attempts, exp backoff)
-  - Handles 4000-char limit via `split_text()`
-  - `send_notice(title, url, date)` – format + broadcast
+- [x] **2.1 `src/config.py`** — loads YAML/JSON; validates `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHANNEL_ID`
+- [x] **2.2 `src/database.py`** — SQLite notices / subscriptions / settings
+- [x] **2.3 `src/utils.py`** — hash, split, format, date extract
+- [x] **2.4 `src/scraper.py`** — Playwright + lxml
+- [x] **2.5 `src/broadcaster.py`** — httpx + tenacity
 - [x] **2.6 `src/heartbeat.py`**
-  - `send()` – reports uptime, total notices, last 3 items
-- [x] **2.7 `src/main.py`**
-  - `main()` – init db, browser, config, start APScheduler
-  - Adaptive polling via `reschedule_job` (5 min if new notices, else 30)
-  - Heartbeat every 6h, DB backup every 24h
-  - Selector validation on startup (warns via Telegram if zero results)
-  - Graceful shutdown (SIGTERM/SIGINT → close browser + db)
+- [x] **2.7 `src/main.py`** — scheduler, startup scrape, command thread
+- [x] **2.8 `src/commands.py`** — admin getUpdates loop (added after original plan)
 
-## Phase 3 – Containerization ✅
+## Phase 3 – Containerization ✅ (image builds; compose is missing Playwright’s recommended flags)
 
-- [x] **3.1 Write `Dockerfile`**
-  - Multi-stage build: builder installs deps + Playwright, final image copies artifacts
-  - Non-root `appuser`, chromium cache from builder
-- [x] **3.2 Write `docker-compose.yml`**
-  - `restart: always`, healthcheck every 6h, volumes for data + logs
+- [x] **3.1 `Dockerfile`** — multi-stage, non-root `appuser`
+- [x] **3.2 `docker-compose.yml`** — `restart: always`, data/logs volumes
 
-## Phase 4 – Hardening & Polish ✅
+## Phase 4 – Hardening & Polish ✅ (present, not all correct)
 
-- [x] **4.1 Logging**
-  - Rotating file handler (`logs/app.log`, max 5MB, 3 backups)
-  - Structured format
-- [x] **4.2 Error handling**
-  - Catch-all in poll job (log + continue)
-  - Playwright timeout (30s)
-  - DB health check method
+- [x] **4.1 Rotating file logs**
+- [x] **4.2 Catch-all in poll job, 30s Playwright timeout, DB health check**
 - [x] **4.3 Adaptive polling**
-  - Reschedules job interval based on new notice count
-- [x] **4.4 Selector validation**
-  - Startup scrape test sends Telegram alert if zero results
-- [x] **4.5 DB backup**
-  - Daily backup to `data/backup/` with 7-day retention
+- [x] **4.4 Startup selector validation**
+- [x] **4.5 Daily DB backup**
 
-## Phase 5 – Testing & Verification ✅
+## Phase 5 – Testing & Verification
 
-- [x] **5.1 Unit tests** (`tests/`)
-  - `test_database.py` – init, insert, dedup, get_recent
-  - `test_utils.py` – sha256, split_text, format_notice
-  - `test_config.py` – settings loading, selectors loading, env helpers
-- [ ] **5.2 Integration test**
-  - Build container: `docker compose build`
-  - Run with real `.env`: `docker compose up -d`
-  - Verify logs: `docker compose logs -f`
-  - Confirm DB created in `data/`
-- [ ] **5.3 Deploy on target server**
-  - `docker compose up -d`
-  - Monitor for first poll cycle
-  - Verify first notice appears in Telegram channel
+- [x] **5.1 Unit tests** — database, utils, config only
+- [ ] **5.2 Integration test** — blocked on Phase 6 (selectors, first-run flood, send-then-record, Markdown, callback_data)
+- [ ] **5.3 Deploy on target server** — blocked on 5.2
 
-## Files Created
+---
+
+## Phase 6 – Defects to fix before any deploy
+
+Source of each item is cited in `docs/RESEARCH-ISSUES.md`. Do these in order.
+
+### 6.1 Correctness (must ship)
+
+- [ ] **F03 Scrape all `/annonces/` links, not only the carousel** — `notice_container` is `div.item`. Live homepage (2026-09-11): 7 carousel slides vs 31 `/annonces/` links. Newer list-panel IDs (9333, 9330, 9326, …) are invisible. Change selectors (or collect every `a[href*="/annonces/"]` + nearby heading). Re-stamp `selectors.json` `_meta`.
+- [ ] **F01 Send, then record** — `insert_notice` runs before `broadcaster.send`. A Telegram 400/5xx permanently drops that URL. Record only after a successful send (or a `sent_at` column).
+- [ ] **F02 Seed on empty DB** — if `notices` is empty after a scrape, insert all current URLs and send nothing.
+- [ ] **F05 Stop using legacy Markdown on untrusted titles** — `parse_mode: Markdown` with `*{title}*`. Switch to HTML + escape `<`, `>`, `&`, or send plain text.
+- [ ] **F06 Fix department `callback_data`** — Telegram allows 1–64 bytes. CS URL with `dept|` is 68 bytes and is expected to 400 the whole keyboard. Use a short id (`dept|info`).
+
+### 6.2 Runtime / data integrity
+
+- [ ] **F08 Serialize SQLite writes** — `check_same_thread=False` with no lock. Python docs: writes must be serialized by the user.
+- [ ] **F07 Require `ADMIN_TELEGRAM_ID` at startup** — empty value makes every command a silent no-op.
+- [ ] **F09 Compose flags for Chromium** — Playwright Docker docs: `init: true`, `ipc: host` (or `shm_size`), seccomp with non-root. Also F13: bind-mounted `./data`/`./logs` may be root-owned on Linux so `appuser` cannot write.
+- [ ] **F10 Drop the unused startup browser** — `init_browser()` is not reused by `poll_job`. Replace `time.sleep` while Playwright is live (`page.wait_for_timeout` or sleep only between launches).
+- [ ] **F11 Do not wait for `networkidle`** — Playwright marks it discouraged; live pages load Google Analytics. Wait for `a[href*="/annonces/"]` (or the new list selector).
+- [ ] **F14 `deleteWebhook` at boot; log getUpdates failures at ERROR; increment offset after handle** — leftover webhooks make commands silently dead. Extra `sleep(2)` after a 10s long poll is unnecessary.
+
+### 6.3 Config / docs drift (fix code or fix docs, not both left lying)
+
+- [ ] **F21 Dead knobs** — no YAML←env overlay; `POLL_INTERVAL` unused; YAML `retry:` unused (tenacity hardcoded); `content_area` unused; `seen_at` never passed.
+- [ ] **F22 DB path** — `database.path: /app/data/notices.db` is Docker-only. Use a path relative to `BASE_DIR`.
+- [ ] **F19 Dedup docs** — README says SHA256 of `url + title`; code keys on `url` only. Align. `/subscribe Informatique` in README does not match English labels (`Computer Science`).
+- [ ] **F12 Healthcheck** — 6h SQLite `connect()` does not prove the bot is polling and can create an empty DB file. Touch a heartbeat file per successful poll; minutes-scale interval.
+- [ ] **F16 Heartbeat / selector warnings** — currently posted to the public channel. Send to admin DM.
+
+### 6.4 Tests that would have caught the above (F17)
+
+- [ ] Fixture HTML: parse count equals all `/annonces/` links, not 7 carousel slides
+- [ ] Seed / first-run: empty DB → zero Telegram calls
+- [ ] Send failure → URL remains unseen
+- [ ] Title containing `*` / `_` / `<` does not 400
+- [ ] Every department `callback_data` ≤ 64 bytes
+- [ ] `validate_env` rejects missing admin
+- [ ] `extract_date` on `02جوان 2025` (no space) — F18
+
+### 6.5 Optional (not required to deploy 6.1)
+
+- [ ] F04: log carousel slides that have a title but no URL
+- [ ] F15: delay per chat (~1s); honor 429 `Retry-After`
+- [ ] F18: optional whitespace in date regex
+- [ ] F20: `link_preview_options` instead of `disable_web_page_preview`
+- [ ] Prove `requests` + lxml vs Playwright on this site; drop Chromium if static HTML is enough
+
+---
+
+## Phase 7 – Integration and deploy
+
+Only after 6.1 is done.
+
+- [ ] **7.1** `docker compose build && docker compose up -d` against a **private test channel**
+- [ ] **7.2** Confirm first cycle seeds with no flood; second cycle with a fixture/new URL sends one message
+- [ ] **7.3** Confirm `/subscribe` Computer Science button works (callback_data fix)
+- [ ] **7.4** Confirm Arabic/French titles render
+- [ ] **7.5** Production channel: bot is admin, volume `./data` is backed up, then `docker compose up -d`
+
+---
+
+## Files
 
 ```
 fs-telegram-bot/
 ├── src/
-│   ├── __init__.py
-│   ├── main.py              # Entry point – scheduler orchestration
-│   ├── scraper.py           # Playwright + lxml page scraper
-│   ├── broadcaster.py       # Telegram messaging with tenacity retry
-│   ├── database.py          # SQLite operations (init, insert, lookup, backup)
-│   ├── config.py            # YAML + env config loader
-│   ├── heartbeat.py         # Periodic health-check reporter
-│   └── utils.py             # Helpers (text splitting, hashing)
+│   ├── main.py
+│   ├── scraper.py
+│   ├── broadcaster.py
+│   ├── commands.py
+│   ├── database.py
+│   ├── config.py
+│   ├── heartbeat.py
+│   └── utils.py
 ├── config/
-│   ├── selectors.json       # CSS selectors for target site
-│   └── settings.yaml        # Global application settings
+│   ├── selectors.json
+│   └── settings.yaml
 ├── tests/
-│   ├── __init__.py
 │   ├── test_database.py
 │   ├── test_utils.py
 │   └── test_config.py
-├── Dockerfile               # Multi-stage build
-├── docker-compose.yml       # Service orchestration
-├── requirements.txt         # Python dependencies
-├── .env.example             # Environment variable template
-├── .gitignore
+├── docs/
+│   └── RESEARCH-ISSUES.md   # cited bug list
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── .env.example
 ├── README.md
 └── PLAN.md
 ```
+
+`src/__init__.py` / `tests/__init__.py` may exist as empty files (research F-list); they are not required for `python -m src.main`.
