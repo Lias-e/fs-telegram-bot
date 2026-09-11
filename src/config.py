@@ -13,13 +13,23 @@ CONFIG_DIR = BASE_DIR / "config"
 
 def load_settings():
     path = CONFIG_DIR / "settings.yaml"
-    with open(path) as f:
-        return yaml.safe_load(f)
+    with open(path, encoding="utf-8") as f:
+        settings = yaml.safe_load(f)
+
+    # Resolve database paths relative to project root
+    db = settings.setdefault("database", {})
+    for key in ("path", "backup_dir"):
+        if key in db and db[key]:
+            p = Path(db[key])
+            if not p.is_absolute():
+                db[key] = str(BASE_DIR / p)
+
+    return settings
 
 
 def load_selectors():
     path = CONFIG_DIR / "selectors.json"
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -28,7 +38,7 @@ def get_env(key, default=None):
 
 
 def validate_env():
-    required = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHANNEL_ID"]
-    missing = [v for v in required if not get_env(v)]
+    required = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHANNEL_ID", "ADMIN_TELEGRAM_ID"]
+    missing = [v for v in required if not (get_env(v) or "").strip()]
     if missing:
         raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")

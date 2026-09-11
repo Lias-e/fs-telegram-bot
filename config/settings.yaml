@@ -37,6 +37,6 @@ logging:
   format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 
 database:
-  path: /app/data/notices.db
-  backup_dir: /app/data/backup
+  path: data/notices.db
+  backup_dir: data/backup
   backup_retention_days: 7

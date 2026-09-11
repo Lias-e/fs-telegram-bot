@@ -6,3 +6,4 @@ __pycache__/
 *.pyo
 venv/
 .playwright/
+.pytest_cache/

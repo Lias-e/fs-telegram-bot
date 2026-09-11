@@ -3,14 +3,14 @@ import random
 import time
 from urllib.parse import urljoin
 
+import httpx
 from lxml import html as lxml_html
 
 logger = logging.getLogger(__name__)
 
 
 class Scraper:
-    def __init__(self, browser, selectors, settings):
-        self.browser = browser
+    def __init__(self, selectors, settings):
         self.selectors = selectors
         self.settings = settings
 
@@ -23,45 +23,62 @@ class Scraper:
 
     def fetch_page(self, url):
         self._random_delay()
-        context = self.browser.new_context(
-            user_agent=random.choice(self.settings["browser"]["user_agents"]),
-        )
-        page = context.new_page()
+        timeout = self.settings["browser"]["timeout_seconds"]
+        user_agent = random.choice(self.settings["browser"]["user_agents"])
         try:
-            page.goto(url, timeout=self.settings["browser"]["timeout_seconds"] * 1000)
-            page.wait_for_load_state("networkidle")
-            html_content = page.content()
+            with httpx.Client(
+                timeout=timeout,
+                follow_redirects=True,
+                headers={"User-Agent": user_agent},
+            ) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+                html_content = resp.text
             logger.info("Fetched page: %s (%d bytes)", url, len(html_content))
             return html_content
         except Exception as e:
             logger.error("Failed to fetch %s: %s", url, e)
             return None
-        finally:
-            page.close()
-            context.close()
 
     def parse_notices(self, html_content, base_url):
         tree = lxml_html.fromstring(html_content)
-        sel = self.selectors
-        container = tree.cssselect(sel["notice_container"])
+        link_sel = self.selectors.get("link", "a[href*='/annonces/']")
         notices = []
+        seen = set()
 
-        for elem in container:
+        for elem in tree.cssselect(link_sel):
             try:
-                title_el = elem.cssselect(sel["title"])
-                link_el = elem.cssselect(sel["link"])
-                date_el = elem.cssselect(sel["date"])
-
-                if not title_el:
+                href = elem.get("href")
+                if not href:
                     continue
-
-                title = title_el[0].text_content().strip()
-                href = link_el[0].get("href") if link_el else None
-                url = urljoin(base_url, href) if href else None
-                date = date_el[0].text_content().strip() if date_el else ""
-
-                if not url:
+                url = urljoin(base_url, href)
+                if url in seen:
                     continue
+                seen.add(url)
+
+                title = (elem.text_content() or "").strip()
+                if not title:
+                    # Prefer nearest preceding heading text
+                    for heading in elem.xpath(
+                        "preceding::h1[1] | preceding::h2[1] | preceding::h3[1]"
+                    ):
+                        title = (heading.text_content() or "").strip()
+                        if title:
+                            break
+                if not title:
+                    title = url
+
+                date = ""
+                date_el = elem.cssselect(self.selectors.get("date", ".carousel-caption h3"))
+                if date_el:
+                    date = date_el[0].text_content().strip()
+                else:
+                    # Caption sibling / parent carousel date if present
+                    parent_dates = elem.xpath(
+                        "ancestor::div[contains(@class,'item')]//*[contains(@class,'carousel-caption')]//h3"
+                    )
+                    if parent_dates:
+                        date = (parent_dates[0].text_content() or "").strip()
 
                 notices.append({
                     "title": title,

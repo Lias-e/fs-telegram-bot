@@ -1,12 +1,11 @@
 {
   "_meta": {
-    "description": "CSS selectors for fsciences.univ-setif.dz notice listings",
+    "description": "CSS selectors for fsciences.univ-setif.dz notice listings (all /annonces/ links, not carousel-only)",
     "validated": true,
-    "last_updated": "2026-06-20"
+    "last_updated": "2026-09-11"
   },
-  "notice_container": "div.item",
-  "title": "h2, h3",
+  "notice_container": "a[href*='/annonces/']",
+  "title": "self",
   "link": "a[href*='/annonces/']",
-  "date": ".carousel-caption h3",
-  "content_area": "div.carousel-caption"
+  "date": ".carousel-caption h3"
 }

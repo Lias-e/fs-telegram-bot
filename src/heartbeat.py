@@ -1,15 +1,15 @@
+import html
 import logging
 import time
-
-from src.broadcaster import Broadcaster
 
 logger = logging.getLogger(__name__)
 
 
 class Heartbeat:
-    def __init__(self, broadcaster: Broadcaster, db):
+    def __init__(self, broadcaster, db, admin_id):
         self.broadcaster = broadcaster
         self.db = db
+        self.admin_id = admin_id
         self.start_time = time.time()
 
     def _uptime(self):
@@ -32,15 +32,17 @@ class Heartbeat:
             count = self.db.count()
             recent = self.db.get_recent(3)
             lines = [
-                "🤖 *Bot Heartbeat*",
-                f"⏱ Uptime: {self._uptime()}",
+                "🤖 <b>Bot Heartbeat</b>",
+                f"⏱ Uptime: {html.escape(self._uptime())}",
                 f"📊 Total notices: {count}",
             ]
             if recent:
-                lines.append("\n*Latest notices:*")
+                lines.append("\n<b>Latest notices:</b>")
                 for row in recent:
-                    lines.append(f"- [{row['title'] or 'Untitled'}]({row['url']})")
-            self.broadcaster.send("\n".join(lines))
-            logger.info("Heartbeat sent")
+                    title = html.escape(row["title"] or "Untitled")
+                    url = html.escape(row["url"], quote=True)
+                    lines.append(f'- <a href="{url}">{title}</a>')
+            self.broadcaster.send_to_admin("\n".join(lines), self.admin_id)
+            logger.info("Heartbeat sent to admin")
         except Exception as e:
             logger.error("Heartbeat failed: %s", e)

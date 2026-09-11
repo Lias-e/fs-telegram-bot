@@ -1,6 +1,5 @@
 import logging
 import logging.handlers
-import os
 import signal
 import sys
 import threading
@@ -21,7 +20,6 @@ from src.utils import extract_date, format_notice_with_seen, sha256_hash
 
 logger = logging.getLogger(__name__)
 
-_browser = None
 _db = None
 _scheduler = None
 
@@ -48,27 +46,38 @@ def setup_logging(settings):
     root.addHandler(rotator)
 
 
-def init_browser(settings):
-    from playwright.sync_api import sync_playwright
-
-    p = sync_playwright().start()
-    browser = p.chromium.launch(headless=True)
-    logger.info("Browser launched")
-    return p, browser
+def touch_last_poll(settings):
+    path = Path(settings["database"]["path"]).parent / "last_poll"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(datetime.now().isoformat(), encoding="utf-8")
 
 
 def poll_job(db, broadcaster, settings, selectors):
     all_targets = settings["poll"].get("targets", [get_env("TARGET_URL", "https://fsciences.univ-setif.dz")])
     targets = db.get_enabled_targets(all_targets)
     try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            scraper = Scraper(browser, selectors, settings)
-            notices = scraper.scrape_all(targets)
+        scraper = Scraper(selectors, settings)
+        notices = scraper.scrape_all(targets)
     except Exception as e:
         logger.error("Poll job failed: %s", e)
-        return 30
+        return settings["poll"]["default_interval_minutes"]
+
+    # Deduplicate by URL across targets (same notice can appear on multiple pages)
+    unique = {}
+    for notice in notices:
+        unique[notice["url"]] = notice
+    notices = list(unique.values())
+
+    # F02: seed on empty DB — insert all, send nothing
+    if db.count() == 0:
+        seeded = 0
+        for notice in notices:
+            hash_digest = sha256_hash(notice["url"])
+            if db.insert_notice(notice["url"], notice["title"], hash_digest):
+                seeded += 1
+        logger.info("Seeded empty DB with %d notices (no broadcast)", seeded)
+        touch_last_poll(settings)
+        return settings["poll"]["default_interval_minutes"]
 
     subs = db.get_subscriptions()
     chat_ids = [s["chat_id"] for s in subs]
@@ -83,16 +92,20 @@ def poll_job(db, broadcaster, settings, selectors):
         if db.is_duplicate(url):
             dup_count += 1
             continue
-        hash_digest = sha256_hash(url)
-        db.insert_notice(url, notice["title"], hash_digest)
         date = extract_date(notice["title"] + " " + notice["date"])
         text = format_notice_with_seen(notice["title"], notice["url"], date)
-        broadcaster.send(text, chat_ids=chat_ids)
-        new_count += 1
-        if new_count > 0:
+        # F01: send first; record only after successful channel delivery
+        ok = broadcaster.send(text, chat_ids=chat_ids)
+        if ok:
+            hash_digest = sha256_hash(url)
+            db.insert_notice(url, notice["title"], hash_digest)
+            new_count += 1
             time.sleep(3)
+        else:
+            logger.error("Send failed for %s — not recording as seen", url)
 
     logger.info("Poll complete: %d new, %d duplicates across %d chats", new_count, dup_count, len(chat_ids))
+    touch_last_poll(settings)
 
     if new_count >= settings["poll"]["fast_trigger_count"]:
         return settings["poll"]["fast_interval_minutes"]
@@ -121,35 +134,30 @@ def signal_handler(signum, frame):
     logger.info("Received signal %s, shutting down...", signum)
     if _scheduler:
         _scheduler.shutdown(wait=False)
-    if _browser:
-        _browser[1].close()
-        _browser[0].stop()
     if _db:
         _db.close()
     sys.exit(0)
 
 
 def main():
-    global _browser, _db, _scheduler
+    global _db, _scheduler
 
     validate_env()
     settings = load_settings()
     selectors = load_selectors()
     setup_logging(settings)
 
+    admin_id = get_env("ADMIN_TELEGRAM_ID")
     db_path = settings["database"]["path"]
     _db = Database(db_path)
 
-    _browser = init_browser(settings)
-    browser = _browser[1]
-
-    scraper = Scraper(browser, selectors, settings)
+    scraper = Scraper(selectors, settings)
     broadcaster = Broadcaster(
         get_env("TELEGRAM_BOT_TOKEN"),
         get_env("TELEGRAM_CHANNEL_ID"),
         settings,
     )
-    heartbeat = Heartbeat(broadcaster, _db)
+    heartbeat = Heartbeat(broadcaster, _db, admin_id)
 
     targets = settings["poll"].get("targets", [get_env("TARGET_URL", "https://fsciences.univ-setif.dz")])
 
@@ -157,13 +165,18 @@ def main():
         sample = scraper.scrape_all(targets)
         if not sample:
             logger.warning("Selector validation: zero notices found on startup")
-            broadcaster.send("⚠️ *Selector Validation Warning*\n\nZero notices found on startup. The site structure may have changed – check `config/selectors.json`.")
+            broadcaster.send_to_admin(
+                "⚠️ <b>Selector Validation Warning</b>\n\n"
+                "Zero notices found on startup. The site structure may have changed – "
+                "check <code>config/selectors.json</code>.",
+                admin_id,
+            )
     except Exception as e:
         logger.warning("Selector validation failed on startup: %s", e)
 
     cmd_handler = CommandHandler(
         get_env("TELEGRAM_BOT_TOKEN"), _db, targets,
-        admin_id=get_env("ADMIN_TELEGRAM_ID", None),
+        admin_id=admin_id,
     )
     cmd_thread = threading.Thread(target=cmd_handler.run_forever, daemon=True)
     cmd_thread.start()

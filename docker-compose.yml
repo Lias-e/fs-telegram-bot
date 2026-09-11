@@ -3,13 +3,20 @@ services:
     build: .
     container_name: fs-telegram-bot
     restart: always
+    init: true
     env_file: .env
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
     healthcheck:
-      test: ["CMD", "python", "-c", "import sqlite3; sqlite3.connect('/app/data/notices.db').execute('SELECT 1')"]
-      interval: 6h
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,time; p='/app/data/last_poll'; assert os.path.isfile(p) and time.time()-os.path.getmtime(p)<7200",
+        ]
+      interval: 5m
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 120s

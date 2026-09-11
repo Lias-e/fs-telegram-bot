@@ -1,9 +1,23 @@
+import html
 import logging
 import time
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Short slugs for Telegram callback_data (must stay ≤ 64 bytes with "dept|" prefix)
+DEPARTMENT_SLUGS = {
+    "main": "https://fsciences.univ-setif.dz",
+    "informatique": "https://fsciences.univ-setif.dz/sites_departements/informatique",
+    "maths": "https://fsciences.univ-setif.dz/sites_departements/maths",
+    "physique": "https://fsciences.univ-setif.dz/sites_departements/physique",
+    "chimie": "https://fsciences.univ-setif.dz/sites_departements/chimie",
+    "mi": "https://fsciences.univ-setif.dz/sites_departements/mi",
+    "sm": "https://fsciences.univ-setif.dz/sites_departements/sm",
+}
+
+URL_TO_SLUG = {url: slug for slug, url in DEPARTMENT_SLUGS.items()}
 
 DEPARTMENT_LABELS = {
     "https://fsciences.univ-setif.dz": "Faculty (main)",
@@ -47,7 +61,7 @@ class CommandHandler:
 
     def _send(self, chat_id, text, reply_markup=None):
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         if reply_markup:
             payload["reply_markup"] = reply_markup
         try:
@@ -73,8 +87,12 @@ class CommandHandler:
         inline_keyboard = []
         for url, label in DEPARTMENT_LABELS.items():
             if url in self.targets:
+                slug = URL_TO_SLUG.get(url)
+                if not slug:
+                    continue
                 status = "✅" if url not in disabled else "❌"
-                inline_keyboard.append([{"text": f"{status} {label}", "callback_data": f"dept|{url}"}])
+                callback_data = f"dept|{slug}"
+                inline_keyboard.append([{"text": f"{status} {label}", "callback_data": callback_data}])
         return {"inline_keyboard": inline_keyboard}
 
     def _edit_keyboard(self, chat_id, message_id):
@@ -93,6 +111,16 @@ class CommandHandler:
 
     def _is_admin(self, user_id):
         return self.admin_id is not None and str(user_id) == str(self.admin_id)
+
+    def _delete_webhook(self):
+        url = f"https://api.telegram.org/bot{self.token}/deleteWebhook"
+        try:
+            with httpx.Client(timeout=10) as client:
+                resp = client.post(url, json={"drop_pending_updates": False})
+                resp.raise_for_status()
+                logger.info("deleteWebhook ok")
+        except Exception as e:
+            logger.error("deleteWebhook failed: %s", e)
 
     def _handle(self, msg):
         chat_id = str(msg.get("chat", {}).get("id", ""))
@@ -126,18 +154,18 @@ class CommandHandler:
             count = self.db.count()
             depts = self.db.get_enabled_targets(self.targets)
             lines = [
-                f"📊 *Total notices:* {count}",
-                f"📡 *Active departments:* {len(depts)}/{len(self.targets)}",
+                f"📊 <b>Total notices:</b> {count}",
+                f"📡 <b>Active departments:</b> {len(depts)}/{len(self.targets)}",
             ]
             self._send(chat_id, "\n".join(lines))
             return
 
         if text == "/help":
             lines = [
-                "*Commands:*",
+                "<b>Commands:</b>",
                 f"{DISPLAY_CMDS['/start']} — Subscribe this chat",
                 f"{DISPLAY_CMDS['/stop']} — Unsubscribe this chat",
-                f"{DISPLAY_CMDS['/status']} — Stats & active departments",
+                f"{DISPLAY_CMDS['/status']} — Stats &amp; active departments",
                 f"{DISPLAY_CMDS['/departments']} — List all departments",
                 f"{DISPLAY_CMDS['/subscribe']} — Toggle departments",
                 f"{DISPLAY_CMDS['/help']} — This message",
@@ -148,11 +176,11 @@ class CommandHandler:
         if text == "/departments":
             disabled_raw = self.db.get_setting("disabled_targets", "")
             disabled = set(disabled_raw.split(",")) if disabled_raw else set()
-            lines = ["*Departments:*"]
+            lines = ["<b>Departments:</b>"]
             for url, label in DEPARTMENT_LABELS.items():
                 if url in self.targets:
                     status = "❌" if url in disabled else "✅"
-                    lines.append(f"{status} {label}")
+                    lines.append(f"{status} {html.escape(label)}")
             self._send(chat_id, "\n".join(lines))
             return
 
@@ -172,13 +200,13 @@ class CommandHandler:
                     matched = url
                     break
             if not matched:
-                self._send(chat_id, f"Department not found. Use /subscribe to see buttons.")
+                self._send(chat_id, "Department not found. Use /subscribe to see buttons.")
                 return
             disabled_raw = self.db.get_setting("disabled_targets", "")
             disabled = set(disabled_raw.split(",")) if disabled_raw else set()
             disabled.discard(matched)
             self.db.set_setting("disabled_targets", ",".join(sorted(disabled)))
-            self._send(chat_id, f"✅ Enabled: {DEPARTMENT_LABELS[matched]}")
+            self._send(chat_id, f"✅ Enabled: {html.escape(DEPARTMENT_LABELS[matched])}")
             return
 
         if text == "/unsubscribe":
@@ -197,13 +225,13 @@ class CommandHandler:
                     matched = url
                     break
             if not matched:
-                self._send(chat_id, f"Department not found. Use /subscribe to see buttons.")
+                self._send(chat_id, "Department not found. Use /subscribe to see buttons.")
                 return
             disabled_raw = self.db.get_setting("disabled_targets", "")
             disabled = set(disabled_raw.split(",")) if disabled_raw else set()
             disabled.add(matched)
             self.db.set_setting("disabled_targets", ",".join(sorted(disabled)))
-            self._send(chat_id, f"❌ Disabled: {DEPARTMENT_LABELS[matched]}")
+            self._send(chat_id, f"❌ Disabled: {html.escape(DEPARTMENT_LABELS[matched])}")
             return
 
     def _handle_callback(self, callback):
@@ -222,7 +250,12 @@ class CommandHandler:
             self._answer_callback(cb_id, "Unknown action")
             return
 
-        url = data.replace("dept|", "", 1)
+        slug = data.replace("dept|", "", 1)
+        url = DEPARTMENT_SLUGS.get(slug)
+        if not url:
+            self._answer_callback(cb_id, "Unknown department")
+            return
+
         disabled_raw = self.db.get_setting("disabled_targets", "")
         disabled = set(disabled_raw.split(",")) if disabled_raw else set()
         label = DEPARTMENT_LABELS.get(url, url)
@@ -249,19 +282,27 @@ class CommandHandler:
                 resp.raise_for_status()
                 data = resp.json()
                 for update in data.get("result", []):
-                    self._offset = update["update_id"] + 1
-                    if "message" in update:
-                        self._handle(update["message"])
-                    elif "callback_query" in update:
-                        self._handle_callback(update["callback_query"])
+                    update_id = update["update_id"]
+                    try:
+                        if "message" in update:
+                            self._handle(update["message"])
+                        elif "callback_query" in update:
+                            self._handle_callback(update["callback_query"])
+                    except Exception as e:
+                        logger.error("Failed to handle update %s: %s", update_id, e)
+                    finally:
+                        # Confirm after attempt so a crash still advances offset
+                        # (Telegram will not redeliver once offset moves).
+                        self._offset = update_id + 1
         except Exception as e:
-            logger.debug("getUpdates poll: %s", e)
+            logger.error("getUpdates poll: %s", e)
 
     def run_forever(self):
+        self._delete_webhook()
         logger.info("Command handler started")
         while True:
             try:
                 self.poll_once()
             except Exception as e:
                 logger.error("Command handler error: %s", e)
-            time.sleep(2)
+                time.sleep(2)

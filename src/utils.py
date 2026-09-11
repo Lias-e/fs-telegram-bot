@@ -1,7 +1,7 @@
 import hashlib
+import html
 import logging
 import re
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ MONTH_MAP = {
 }
 
 DATE_RE = re.compile(
-    r"(\d{1,2})\s+(%s)\s+(\d{4})" % "|".join(MONTH_MAP.keys()),
+    r"(\d{1,2})\s*(%s)\s+(\d{4})" % "|".join(re.escape(k) for k in MONTH_MAP.keys()),
     re.IGNORECASE,
 )
 
@@ -59,21 +59,14 @@ def extract_date(text: str) -> str:
 
 
 def format_notice(title: str, url: str, date: str = "") -> str:
-    lines = [f"📄 *{title}*"]
+    safe_title = html.escape(title)
+    safe_url = html.escape(url, quote=True)
+    lines = [f"📄 <b>{safe_title}</b>"]
     if date:
-        lines.append(f"📅 {date}")
-    lines.append(f"🔗 [Open Notice]({url})")
+        lines.append(f"📅 {html.escape(date)}")
+    lines.append(f'🔗 <a href="{safe_url}">Open Notice</a>')
     return "\n\n".join(lines)
 
 
-def format_notice_with_seen(title: str, url: str, date: str = "", seen_at: str = "") -> str:
-    lines = [f"📄 *{title}*"]
-    parts = []
-    if date:
-        parts.append(f"📅 {date}")
-    if seen_at and not date:
-        parts.append(f"🕐 Detected: {seen_at}")
-    if parts:
-        lines.append("\n".join(parts))
-    lines.append(f"🔗 [Open Notice]({url})")
-    return "\n\n".join(lines)
+def format_notice_with_seen(title: str, url: str, date: str = "") -> str:
+    return format_notice(title, url, date)
