@@ -5,6 +5,7 @@ import signal
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -181,6 +182,7 @@ def main():
         IntervalTrigger(minutes=settings["poll"]["default_interval_minutes"]),
         id="poll",
         replace_existing=True,
+        next_run_time=datetime.now(),
     )
 
     _scheduler.add_job(
@@ -204,8 +206,6 @@ def main():
 
     _scheduler.start()
     logger.info("Bot started. Polling every %d min.", settings["poll"]["default_interval_minutes"])
-
-    run_poll()
 
     # Keep main thread alive — daemon threads (scheduler, command handler)
     # would be killed on exit otherwise, causing the container to restart
