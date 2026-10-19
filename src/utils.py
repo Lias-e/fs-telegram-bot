@@ -58,15 +58,17 @@ def extract_date(text: str) -> str:
     return ""
 
 
-def format_notice(title: str, url: str, date: str = "") -> str:
+def format_notice(title: str, url: str, date: str = "", department: str = "") -> str:
     safe_title = html.escape(title)
     safe_url = html.escape(url, quote=True)
     lines = [f"📄 <b>{safe_title}</b>"]
+    if department:
+        lines.append(f"🏷 {html.escape('#' + department)}")
     if date:
         lines.append(f"📅 {html.escape(date)}")
     lines.append(f'🔗 <a href="{safe_url}">Open Notice</a>')
     return "\n\n".join(lines)
 
 
-def format_notice_with_seen(title: str, url: str, date: str = "") -> str:
-    return format_notice(title, url, date)
+def format_notice_with_seen(title: str, url: str, date: str = "", department: str = "") -> str:
+    return format_notice(title, url, date, department)

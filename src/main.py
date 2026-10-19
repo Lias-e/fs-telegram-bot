@@ -10,12 +10,12 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from src.broadcaster import Broadcaster
+from src.broadcaster import Broadcaster, PHOTO_CAPTION_LIMIT
 from src.commands import CommandHandler
 from src.config import BASE_DIR, get_env, load_selectors, load_settings, validate_env
 from src.database import Database
 from src.heartbeat import Heartbeat
-from src.scraper import Scraper
+from src.scraper import MAX_ATTACHMENTS_PER_NOTICE, Scraper
 from src.utils import extract_date, format_notice_with_seen, sha256_hash
 
 logger = logging.getLogger(__name__)
@@ -62,10 +62,18 @@ def poll_job(db, broadcaster, settings, selectors):
         logger.error("Poll job failed: %s", e)
         return settings["poll"]["default_interval_minutes"]
 
-    # Deduplicate by URL across targets (same notice can appear on multiple pages)
+    # Deduplicate by URL across targets (same notice can appear on multiple pages).
+    # When a notice appears both on the faculty homepage and a department page,
+    # prefer the department-tagged copy so the announcement gets its hashtag.
     unique = {}
     for notice in notices:
-        unique[notice["url"]] = notice
+        known = unique.get(notice["url"])
+        if (
+            known is None
+            or known.get("department") == "General"
+            and notice.get("department") not in (None, "General")
+        ):
+            unique[notice["url"]] = notice
     notices = list(unique.values())
 
     # F02: seed on empty DB — insert all, send nothing
@@ -92,13 +100,61 @@ def poll_job(db, broadcaster, settings, selectors):
         if db.is_duplicate(url):
             dup_count += 1
             continue
-        date = extract_date(notice["title"] + " " + notice["date"])
-        text = format_notice_with_seen(notice["title"], notice["url"], date)
+        detail = None
+        try:
+            detail = scraper.fetch_notice_details(url)
+        except Exception as e:
+            logger.warning("Notice detail fetch failed for %s: %s", url, e)
+        title = notice["title"]
+        if detail and detail["title"]:
+            title = detail["title"]
+        body_subtitle = (detail or {}).get("subtitle", "")
+        body_text = (detail or {}).get("body", "")
+        date = extract_date(" ".join(
+            part for part in (title, body_subtitle, body_text, notice["date"]) if part
+        ))
+        text = format_notice_with_seen(title, url, date, department=notice.get("department", ""))
+        # If there is an attachment and the caption fits Telegram's 1024-char
+        # limit, put the whole message on the file itself instead of sending a
+        # separate text message.
+        attachments = (detail or {}).get("attachments", [])[:MAX_ATTACHMENTS_PER_NOTICE]
+        if attachments and len(text) <= PHOTO_CAPTION_LIMIT:
+            path = scraper.download_attachment(attachments[0], "data/attachments")
+            if path is not None:
+                ok = broadcaster.send_file(
+                    str(path), attachments[0]["kind"], caption=text, chat_ids=chat_ids
+                )
+                Path(path).unlink(missing_ok=True)
+                for attachment in attachments[1:]:
+                    p = scraper.download_attachment(attachment, "data/attachments")
+                    if p is None:
+                        continue
+                    broadcaster.send_file(str(p), attachment["kind"], caption=title, chat_ids=chat_ids)
+                    Path(p).unlink(missing_ok=True)
+                    time.sleep(3)
+            else:
+                ok = broadcaster.send(text, chat_ids=chat_ids)
+                for attachment in attachments:
+                    p = scraper.download_attachment(attachment, "data/attachments")
+                    if p is None:
+                        continue
+                    broadcaster.send_file(str(p), attachment["kind"], caption=title, chat_ids=chat_ids)
+                    Path(p).unlink(missing_ok=True)
+                    time.sleep(3)
+        else:
+            ok = broadcaster.send(text, chat_ids=chat_ids)
+            for attachment in attachments:
+                p = scraper.download_attachment(attachment, "data/attachments")
+                if p is None:
+                    continue
+                logger.info("Sending attachment %s for %s", attachment["filename"], url)
+                broadcaster.send_file(str(p), attachment["kind"], caption=title, chat_ids=chat_ids)
+                Path(p).unlink(missing_ok=True)
+                time.sleep(3)
         # F01: send first; record only after successful channel delivery
-        ok = broadcaster.send(text, chat_ids=chat_ids)
         if ok:
             hash_digest = sha256_hash(url)
-            db.insert_notice(url, notice["title"], hash_digest)
+            db.insert_notice(url, title, hash_digest)
             new_count += 1
             time.sleep(3)
         else:

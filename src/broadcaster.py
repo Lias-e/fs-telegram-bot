@@ -1,5 +1,6 @@
 import logging
 import time
+from pathlib import Path
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -8,7 +9,9 @@ from src.utils import split_text
 
 logger = logging.getLogger(__name__)
 
-TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_API = "https://api.telegram.org/bot{token}"
+PHOTO_CAPTION_LIMIT = 1024
+DOCUMENT_CAPTION_LIMIT = 1024
 
 
 class Broadcaster:
@@ -33,7 +36,7 @@ class Broadcaster:
             reraise=True,
         )
         def _do_post():
-            url = TELEGRAM_API.format(token=self.token)
+            url = TELEGRAM_API.format(token=self.token) + "/sendMessage"
             payload = {
                 "chat_id": chat_id,
                 "text": text,
@@ -45,6 +48,47 @@ class Broadcaster:
                 return resp.json()
 
         return _do_post()
+
+    def _post_file(self, file_path, kind, caption, chat_id):
+        @retry(
+            stop=stop_after_attempt(self._max_attempts),
+            wait=wait_exponential(
+                multiplier=self._backoff_multiplier,
+                min=self._backoff_min,
+                max=self._backoff_max,
+            ),
+            reraise=True,
+        )
+        def _do_post():
+            url = TELEGRAM_API.format(token=self.token) + (
+                "/sendPhoto" if kind == "photo" else "/sendDocument"
+            )
+            method = "photo" if kind == "photo" else "document"
+            cap = (caption or "")[: PHOTO_CAPTION_LIMIT if kind == "photo" else DOCUMENT_CAPTION_LIMIT]
+            with httpx.Client(timeout=120) as client:
+                with open(file_path, "rb") as fh:
+                    resp = client.post(
+                        url,
+                        data={"chat_id": chat_id, "caption": cap, "parse_mode": "HTML"},
+                        files={method: (Path(file_path).name, fh)},
+                    )
+                resp.raise_for_status()
+                return resp.json()
+
+        return _do_post()
+
+    def send_file(self, file_path, kind, caption="", chat_ids=None):
+        """Send a local file (photo or document) to the given chats."""
+        if chat_ids is None:
+            chat_ids = [self.default_chat_id]
+        ok_all = True
+        for chat_id in chat_ids:
+            try:
+                self._post_file(file_path, kind, caption, chat_id)
+            except Exception as e:
+                logger.error("Failed to send file to %s: %s", chat_id, e)
+                ok_all = False
+        return ok_all
 
     def _send_to_chat(self, text, chat_id):
         """Send all parts to one chat. Returns True if every part succeeded."""
