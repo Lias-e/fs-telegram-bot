@@ -123,11 +123,33 @@ class Database:
             self.conn.commit()
 
     def get_enabled_targets(self, all_targets):
+        """Targets enabled globally. Always returns a fresh copy (callers
+        toggle against it) so the original list is never mutated."""
         disabled = self.get_setting("disabled_targets", "")
         if not disabled:
-            return all_targets
+            return list(all_targets)
         disabled_list = set(disabled.split(","))
         return [t for t in all_targets if t not in disabled_list]
+
+    # ---- Per-chat department subscriptions -------------------------------- #
+
+    def get_chat_targets(self, chat_id):
+        """
+        Return the list of target URLs this chat is subscribed to.
+        None means "not configured" – the chat follows the global default
+        (all enabled targets). [] means explicitly unsubscribed from everything.
+        """
+        raw = self.get_setting(f"chat_targets:{chat_id}")
+        if raw is None:
+            return None
+        return [t for t in raw.split(",") if t]
+
+    def set_chat_targets(self, chat_id, urls):
+        self.set_setting(f"chat_targets:{chat_id}", ",".join(sorted(set(urls))))
+
+    def default_enabled_targets(self, all_targets):
+        """Targets enabled globally (what unconfigured chats receive)."""
+        return self.get_enabled_targets(all_targets)
 
     def backup(self, backup_dir, retention_days=7):
         backup_path = Path(backup_dir)

@@ -88,10 +88,10 @@ def poll_job(db, broadcaster, settings, selectors):
         return settings["poll"]["default_interval_minutes"]
 
     subs = db.get_subscriptions()
-    chat_ids = [s["chat_id"] for s in subs]
     default_chat = get_env("TELEGRAM_CHANNEL_ID")
-    if default_chat and default_chat not in chat_ids:
-        chat_ids.insert(0, default_chat)
+    if default_chat:
+        subs = [s for s in subs if s["chat_id"] != default_chat]
+        # The channel always receives everything (admin-controlled scope).
 
     new_count = 0
     dup_count = 0
@@ -100,57 +100,78 @@ def poll_job(db, broadcaster, settings, selectors):
         if db.is_duplicate(url):
             dup_count += 1
             continue
-        detail = None
-        try:
-            detail = scraper.fetch_notice_details(url)
-        except Exception as e:
-            logger.warning("Notice detail fetch failed for %s: %s", url, e)
-        title = notice["title"]
-        if detail and detail["title"]:
-            title = detail["title"]
-        body_subtitle = (detail or {}).get("subtitle", "")
-        body_text = (detail or {}).get("body", "")
-        date = extract_date(" ".join(
-            part for part in (title, body_subtitle, body_text, notice["date"]) if part
-        ))
-        text = format_notice_with_seen(title, url, date, department=notice.get("department", ""))
-        # If there is an attachment and the caption fits Telegram's 1024-char
-        # limit, put the whole message on the file itself instead of sending a
-        # separate text message.
-        attachments = (detail or {}).get("attachments", [])[:MAX_ATTACHMENTS_PER_NOTICE]
-        if attachments and len(text) <= PHOTO_CAPTION_LIMIT:
-            path = scraper.download_attachment(attachments[0], "data/attachments")
-            if path is not None:
-                ok = broadcaster.send_file(
-                    str(path), attachments[0]["kind"], caption=text, chat_ids=chat_ids
-                )
-                Path(path).unlink(missing_ok=True)
-                for attachment in attachments[1:]:
-                    p = scraper.download_attachment(attachment, "data/attachments")
-                    if p is None:
-                        continue
-                    broadcaster.send_file(str(p), attachment["kind"], caption=title, chat_ids=chat_ids)
-                    Path(p).unlink(missing_ok=True)
-                    time.sleep(3)
+        source = notice.get("source", "")
+        # Per-chat department filtering: chats with no explicit selection
+        # receive everything; chats with a selection only matching targets.
+        chat_ids = []
+        if default_chat:
+            chat_ids.append(default_chat)
+        for sub in subs:
+            chat_id = sub["chat_id"]
+            selection = db.get_chat_targets(chat_id)
+            if selection is None or source in selection:
+                chat_ids.append(chat_id)
+        if not chat_ids:
+            logger.info("No subscriber wants %s (%s) — recording only", url, notice.get("department"))
+            ok = True
+            text = format_notice_with_seen(
+                notice["title"], url, extract_date(notice["title"] + " " + notice["date"]),
+                department=notice.get("department", ""),
+            )
+        else:
+            detail = None
+            try:
+                detail = scraper.fetch_notice_details(url)
+            except Exception as e:
+                logger.warning("Notice detail fetch failed for %s: %s", url, e)
+            title = notice["title"]
+            if detail and detail["title"]:
+                title = detail["title"]
+            body_subtitle = (detail or {}).get("subtitle", "")
+            body_text = (detail or {}).get("body", "")
+            date = extract_date(" ".join(
+                part for part in (title, body_subtitle, body_text, notice["date"]) if part
+            ))
+            text = format_notice_with_seen(title, url, date, department=notice.get("department", ""))
+
+        if chat_ids:
+            # If there is an attachment and the caption fits Telegram's 1024-char
+            # limit, put the whole message on the file itself instead of sending a
+            # separate text message.
+            attachments = (detail or {}).get("attachments", [])[:MAX_ATTACHMENTS_PER_NOTICE]
+            if attachments and len(text) <= PHOTO_CAPTION_LIMIT:
+                path = scraper.download_attachment(attachments[0], "data/attachments")
+                if path is not None:
+                    ok = broadcaster.send_file(
+                        str(path), attachments[0]["kind"], caption=text, chat_ids=chat_ids
+                    )
+                    Path(path).unlink(missing_ok=True)
+                    for attachment in attachments[1:]:
+                        p = scraper.download_attachment(attachment, "data/attachments")
+                        if p is None:
+                            continue
+                        broadcaster.send_file(str(p), attachment["kind"], caption=title, chat_ids=chat_ids)
+                        Path(p).unlink(missing_ok=True)
+                        time.sleep(3)
+                else:
+                    ok = broadcaster.send(text, chat_ids=chat_ids)
+                    for attachment in attachments:
+                        p = scraper.download_attachment(attachment, "data/attachments")
+                        if p is None:
+                            continue
+                        broadcaster.send_file(str(p), attachment["kind"], caption=title, chat_ids=chat_ids)
+                        Path(p).unlink(missing_ok=True)
+                        time.sleep(3)
             else:
                 ok = broadcaster.send(text, chat_ids=chat_ids)
                 for attachment in attachments:
                     p = scraper.download_attachment(attachment, "data/attachments")
                     if p is None:
                         continue
+                    logger.info("Sending attachment %s for %s", attachment["filename"], url)
                     broadcaster.send_file(str(p), attachment["kind"], caption=title, chat_ids=chat_ids)
                     Path(p).unlink(missing_ok=True)
                     time.sleep(3)
-        else:
-            ok = broadcaster.send(text, chat_ids=chat_ids)
-            for attachment in attachments:
-                p = scraper.download_attachment(attachment, "data/attachments")
-                if p is None:
-                    continue
-                logger.info("Sending attachment %s for %s", attachment["filename"], url)
-                broadcaster.send_file(str(p), attachment["kind"], caption=title, chat_ids=chat_ids)
-                Path(p).unlink(missing_ok=True)
-                time.sleep(3)
         # F01: send first; record only after successful channel delivery
         if ok:
             hash_digest = sha256_hash(url)
@@ -160,7 +181,7 @@ def poll_job(db, broadcaster, settings, selectors):
         else:
             logger.error("Send failed for %s — not recording as seen", url)
 
-    logger.info("Poll complete: %d new, %d duplicates across %d chats", new_count, dup_count, len(chat_ids))
+    logger.info("Poll complete: %d new, %d duplicates across %d chats", new_count, dup_count, len(subs) + (1 if default_chat else 0))
     touch_last_poll(settings)
 
     if new_count >= settings["poll"]["fast_trigger_count"]:

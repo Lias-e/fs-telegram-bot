@@ -81,26 +81,49 @@ class CommandHandler:
         except Exception as e:
             logger.error("Failed to answer callback: %s", e)
 
-    def _build_dept_keyboard(self):
-        disabled_raw = self.db.get_setting("disabled_targets", "")
-        disabled = set(disabled_raw.split(",")) if disabled_raw else set()
+    def _build_dept_keyboard(self, chat_id):
+        """Inline keyboard reflecting THIS chat's department selection."""
+        selection = self.db.get_chat_targets(chat_id)
+        if selection is None:
+            selection = self._default_enabled()
+        enabled = set(selection)
         inline_keyboard = []
         for url, label in DEPARTMENT_LABELS.items():
             if url in self.targets:
                 slug = URL_TO_SLUG.get(url)
                 if not slug:
                     continue
-                status = "✅" if url not in disabled else "❌"
+                status = "✅" if url in enabled else "❌"
                 callback_data = f"dept|{slug}"
                 inline_keyboard.append([{"text": f"{status} {label}", "callback_data": callback_data}])
         return {"inline_keyboard": inline_keyboard}
+
+    def _default_enabled(self):
+        return self.db.default_enabled_targets(self.targets)
+
+    def _user_enabled(self, chat_id):
+        """This chat's enabled targets (explicit selection or global default)."""
+        selection = self.db.get_chat_targets(chat_id)
+        if selection is None:
+            return self._default_enabled()
+        return selection
+
+    def _toggle_chat_target(self, chat_id, url):
+        """Toggle one department for this chat. Returns True if now enabled."""
+        selection = self._user_enabled(chat_id)
+        if url in selection:
+            selection.remove(url)
+        else:
+            selection.append(url)
+        self.db.set_chat_targets(chat_id, selection)
+        return url in selection
 
     def _edit_keyboard(self, chat_id, message_id):
         url = f"https://api.telegram.org/bot{self.token}/editMessageReplyMarkup"
         payload = {
             "chat_id": chat_id,
             "message_id": message_id,
-            "reply_markup": self._build_dept_keyboard(),
+            "reply_markup": self._build_dept_keyboard(chat_id),
         }
         try:
             with httpx.Client(timeout=10) as client:
@@ -129,16 +152,15 @@ class CommandHandler:
         if not text or not chat_id:
             return
 
-        if not self._is_admin(user_id):
-            return
-
         text = DISPLAY_TO_CMD.get(text, text)
 
         if text == "/start":
             self.db.add_subscription(chat_id, msg.get("chat", {}).get("title", ""))
             self._send(
                 chat_id,
-                "✅ This chat is now subscribed to faculty announcements.",
+                "✅ This chat is now subscribed to faculty announcements.\n\n"
+                "All departments are enabled by default — use /subscribe to "
+                "pick only the ones you receive.",
                 reply_markup=REPLY_KEYBOARD,
             )
             logger.info("Subscribed chat %s", chat_id)
@@ -152,34 +174,41 @@ class CommandHandler:
 
         if text == "/status":
             count = self.db.count()
-            depts = self.db.get_enabled_targets(self.targets)
+            enabled = self._user_enabled(chat_id)
+            labels = [
+                DEPARTMENT_LABELS[u].split(" (")[0]
+                for u in enabled
+                if u in DEPARTMENT_LABELS
+            ]
             lines = [
                 f"📊 <b>Total notices:</b> {count}",
-                f"📡 <b>Active departments:</b> {len(depts)}/{len(self.targets)}",
+                f"📡 <b>You receive:</b> {len(enabled)}/{len(self.targets)} departments",
             ]
+            if labels:
+                lines.append(f"🏷 {html.escape(', '.join(labels))}")
             self._send(chat_id, "\n".join(lines))
             return
 
         if text == "/help":
             lines = [
                 "<b>Commands:</b>",
-                f"{DISPLAY_CMDS['/start']} — Subscribe this chat",
+                f"{DISPLAY_CMDS['/start']} — Subscribe this chat (all departments)",
                 f"{DISPLAY_CMDS['/stop']} — Unsubscribe this chat",
-                f"{DISPLAY_CMDS['/status']} — Stats &amp; active departments",
-                f"{DISPLAY_CMDS['/departments']} — List all departments",
-                f"{DISPLAY_CMDS['/subscribe']} — Toggle departments",
+                f"{DISPLAY_CMDS['/status']} — Your subscription summary",
+                f"{DISPLAY_CMDS['/departments']} — Your enabled departments",
+                f"{DISPLAY_CMDS['/subscribe']} — Pick which departments you receive",
+                f"{DISPLAY_CMDS['/unsubscribe']} — Same as /subscribe (toggle off)",
                 f"{DISPLAY_CMDS['/help']} — This message",
             ]
             self._send(chat_id, "\n".join(lines))
             return
 
         if text == "/departments":
-            disabled_raw = self.db.get_setting("disabled_targets", "")
-            disabled = set(disabled_raw.split(",")) if disabled_raw else set()
-            lines = ["<b>Departments:</b>"]
+            enabled = set(self._user_enabled(chat_id))
+            lines = ["<b>Your departments:</b>"]
             for url, label in DEPARTMENT_LABELS.items():
                 if url in self.targets:
-                    status = "❌" if url in disabled else "✅"
+                    status = "❌" if url not in enabled else "✅"
                     lines.append(f"{status} {html.escape(label)}")
             self._send(chat_id, "\n".join(lines))
             return
@@ -187,8 +216,8 @@ class CommandHandler:
         if text == "/subscribe":
             self._send(
                 chat_id,
-                "Tap a department to toggle it on/off:",
-                reply_markup=self._build_dept_keyboard(),
+                "Tap a department to toggle it on/off for this chat:",
+                reply_markup=self._build_dept_keyboard(chat_id),
             )
             return
 
@@ -202,18 +231,18 @@ class CommandHandler:
             if not matched:
                 self._send(chat_id, "Department not found. Use /subscribe to see buttons.")
                 return
-            disabled_raw = self.db.get_setting("disabled_targets", "")
-            disabled = set(disabled_raw.split(",")) if disabled_raw else set()
-            disabled.discard(matched)
-            self.db.set_setting("disabled_targets", ",".join(sorted(disabled)))
-            self._send(chat_id, f"✅ Enabled: {html.escape(DEPARTMENT_LABELS[matched])}")
+            if matched in self._user_enabled(chat_id):
+                self._send(chat_id, f"You already receive: {html.escape(DEPARTMENT_LABELS[matched])}")
+                return
+            self._toggle_chat_target(chat_id, matched)
+            self._send(chat_id, f"✅ Enabled for this chat: {html.escape(DEPARTMENT_LABELS[matched])}")
             return
 
         if text == "/unsubscribe":
             self._send(
                 chat_id,
-                "Tap a department to toggle it on/off:",
-                reply_markup=self._build_dept_keyboard(),
+                "Tap a department to toggle it on/off for this chat:",
+                reply_markup=self._build_dept_keyboard(chat_id),
             )
             return
 
@@ -227,11 +256,11 @@ class CommandHandler:
             if not matched:
                 self._send(chat_id, "Department not found. Use /subscribe to see buttons.")
                 return
-            disabled_raw = self.db.get_setting("disabled_targets", "")
-            disabled = set(disabled_raw.split(",")) if disabled_raw else set()
-            disabled.add(matched)
-            self.db.set_setting("disabled_targets", ",".join(sorted(disabled)))
-            self._send(chat_id, f"❌ Disabled: {html.escape(DEPARTMENT_LABELS[matched])}")
+            if matched not in self._user_enabled(chat_id):
+                self._send(chat_id, f"You don't receive: {html.escape(DEPARTMENT_LABELS[matched])}")
+                return
+            self._toggle_chat_target(chat_id, matched)
+            self._send(chat_id, f"❌ Disabled for this chat: {html.escape(DEPARTMENT_LABELS[matched])}")
             return
 
     def _handle_callback(self, callback):
@@ -242,12 +271,14 @@ class CommandHandler:
         user_id = callback.get("from", {}).get("id")
         message_id = msg.get("message_id")
 
-        if not self._is_admin(user_id):
-            self._answer_callback(cb_id, "Not authorized", show_alert=True)
-            return
-
         if not data.startswith("dept|"):
             self._answer_callback(cb_id, "Unknown action")
+            return
+
+        # The tap is only honoured if it comes from the same chat the keyboard
+        # was posted in (stops random users editing someone else's selection).
+        if str(callback.get("from", {}).get("id")) != chat_id:
+            self._answer_callback(cb_id, "Not authorized", show_alert=True)
             return
 
         slug = data.replace("dept|", "", 1)
@@ -256,18 +287,10 @@ class CommandHandler:
             self._answer_callback(cb_id, "Unknown department")
             return
 
-        disabled_raw = self.db.get_setting("disabled_targets", "")
-        disabled = set(disabled_raw.split(",")) if disabled_raw else set()
+        enabled = self._toggle_chat_target(chat_id, url)
         label = DEPARTMENT_LABELS.get(url, url)
+        action = "✅ Enabled" if enabled else "❌ Disabled"
 
-        if url in disabled:
-            disabled.discard(url)
-            action = "✅ Enabled"
-        else:
-            disabled.add(url)
-            action = "❌ Disabled"
-
-        self.db.set_setting("disabled_targets", ",".join(sorted(disabled)))
         self._answer_callback(cb_id, f"{action}: {label}")
 
         if chat_id and message_id:

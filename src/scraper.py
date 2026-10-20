@@ -105,6 +105,7 @@ class Scraper:
                     "url": url,
                     "date": date,
                     "department": department,
+                    "source": base_url,
                 })
             except Exception as e:
                 logger.warning("Skipped notice element: %s", e)
