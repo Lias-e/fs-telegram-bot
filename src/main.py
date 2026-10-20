@@ -1,5 +1,7 @@
 import logging
 import logging.handlers
+import json
+import re
 import signal
 import sys
 import threading
@@ -15,6 +17,7 @@ from src.commands import CommandHandler
 from src.config import BASE_DIR, get_env, load_selectors, load_settings, validate_env
 from src.database import Database
 from src.heartbeat import Heartbeat
+from src.llm import LLMEnhancer
 from src.scraper import MAX_ATTACHMENTS_PER_NOTICE, Scraper
 from src.utils import extract_date, format_notice_with_seen, sha256_hash
 
@@ -52,7 +55,62 @@ def touch_last_poll(settings):
     path.write_text(datetime.now().isoformat(), encoding="utf-8")
 
 
-def poll_job(db, broadcaster, settings, selectors):
+# Titles on the department pages: "EMPLOI DU TEMPS LICENCE",
+# "PLANNING MÉDECINE BIG DATA 2", "Emplois du temps", timetables, etc.
+TIMETABLE_RE = re.compile(
+    r"emploi[s]?\s+d[u']\s*temps|planning|timetable",
+    re.IGNORECASE,
+)
+
+
+def update_timetable_index(db, notices):
+    """
+    Refresh the latest "Emplois du temps" index used by the /schedule
+    command. Keeps a few entries per department, listing order = newest
+    first as delivered by the site.
+    """
+    entries = []
+    seen_urls = set()
+    for notice in notices:
+        if not TIMETABLE_RE.search(notice.get("title", "")):
+            continue
+        url = notice["url"]
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        entries.append({
+            "source": notice.get("source", ""),
+            "title": notice["title"],
+            "url": url,
+            "subtitle": notice.get("date", ""),
+        })
+    db.set_setting("timetable_index", json.dumps(entries, ensure_ascii=False))
+    return len(entries)
+
+
+def llm_enhance(db, enhancer, title, subtitle, body, url):
+    """Wrap LLM enhancement with the DB cache keyed by notice URL.
+    Returns (clean_title, summary, tags) with safe fallbacks."""
+    cache_key = f"llm_cache:{url}"
+    cached = db.get_setting(cache_key)
+    if cached:
+        try:
+            data = json.loads(cached)
+            return data.get("title"), data.get("summary", ""), data.get("tags", [])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    result = enhancer.enhance(title=title, subtitle=subtitle, body=body, notice_url=url) \
+        if enhancer else None
+    if result:
+        clean = result.get("clean_title") or title
+        db.set_setting(cache_key, json.dumps({
+            "title": clean, "summary": result.get("summary", ""), "tags": result.get("tags", []),
+        }, ensure_ascii=False))
+        return clean, result.get("summary", ""), result.get("tags", [])
+    return title, "", []
+
+
+def poll_job(db, broadcaster, settings, selectors, enhancer=None):
     all_targets = settings["poll"].get("targets", [get_env("TARGET_URL", "https://fsciences.univ-setif.dz")])
     targets = db.get_enabled_targets(all_targets)
     try:
@@ -75,6 +133,13 @@ def poll_job(db, broadcaster, settings, selectors):
         ):
             unique[notice["url"]] = notice
     notices = list(unique.values())
+
+    # Keep the /schedule timetable index fresh after every scrape
+    try:
+        timetable_count = update_timetable_index(db, notices)
+        logger.info("Timetable index refreshed: %d entries", timetable_count)
+    except Exception as e:
+        logger.warning("Timetable index update failed: %s", e)
 
     # F02: seed on empty DB — insert all, send nothing
     if db.count() == 0:
@@ -132,7 +197,13 @@ def poll_job(db, broadcaster, settings, selectors):
             date = extract_date(" ".join(
                 part for part in (title, body_subtitle, body_text, notice["date"]) if part
             ))
-            text = format_notice_with_seen(title, url, date, department=notice.get("department", ""))
+            title, summary, tags = llm_enhance(
+                db, enhancer, title, body_subtitle, body_text, url
+            )
+            text = format_notice_with_seen(
+                title, url, date, department=notice.get("department", ""),
+                summary=summary, tags=tags,
+            )
 
         if chat_ids:
             # If there is an attachment and the caption fits Telegram's 1024-char
@@ -251,6 +322,8 @@ def main():
     except Exception as e:
         logger.warning("Selector validation failed on startup: %s", e)
 
+    enhancer = LLMEnhancer(settings, get_env("LLM_API_KEY") or None)
+
     cmd_handler = CommandHandler(
         get_env("TELEGRAM_BOT_TOKEN"), _db, targets,
         admin_id=admin_id,
@@ -261,7 +334,7 @@ def main():
     _scheduler = BackgroundScheduler()
 
     def run_poll():
-        interval = poll_job(_db, broadcaster, settings, selectors)
+        interval = poll_job(_db, broadcaster, settings, selectors, enhancer)
         _scheduler.reschedule_job(
             "poll",
             trigger=IntervalTrigger(minutes=interval),

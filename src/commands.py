@@ -1,4 +1,5 @@
 import html
+import json
 import logging
 import time
 
@@ -34,6 +35,7 @@ DISPLAY_CMDS = {
     "/stop": "⛔ Stop",
     "/status": "📊 Status",
     "/departments": "📋 Departments",
+    "/schedule": "🗓 Timetables",
     "/help": "❓ Help",
     "/subscribe": "✅ Subscribe",
     "/unsubscribe": "❌ Unsubscribe",
@@ -43,12 +45,67 @@ DISPLAY_TO_CMD = {v: k for k, v in DISPLAY_CMDS.items()}
 
 REPLY_KEYBOARD = {
     "keyboard": [
-        [DISPLAY_CMDS["/status"], DISPLAY_CMDS["/departments"], DISPLAY_CMDS["/help"]],
+        [DISPLAY_CMDS["/status"], DISPLAY_CMDS["/schedule"], DISPLAY_CMDS["/help"]],
         [DISPLAY_CMDS["/subscribe"], DISPLAY_CMDS["/unsubscribe"]],
         [DISPLAY_CMDS["/stop"]],
     ],
     "resize_keyboard": True,
 }
+
+
+MAX_PER_DEPARTMENT = 4
+
+
+def _format_timetables(db):
+    """
+    Latest "Emplois du temps" notices grouped by department, from the index
+    that the poll job refreshes after every scrape.
+    """
+    raw = db.get_setting("timetable_index", "[]")
+    try:
+        entries = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        entries = []
+    entries = [e for e in entries if isinstance(e, dict) and e.get("url") and e.get("title")]
+    if not entries:
+        return (
+            "🗓 <b>Timetables</b>\n\n"
+            "No timetable announcements found yet. They will appear here as "
+            "soon as the site publishes any."
+        )
+
+    grouped = {}
+    order = []
+    for e in entries:
+        dept = e.get("source") or list(DEPARTMENT_LABELS)[0]
+        if dept not in DEPARTMENT_LABELS:
+            dept = list(DEPARTMENT_LABELS)[0]
+        if dept not in grouped:
+            grouped[dept] = []
+            order.append(dept)
+        if len(grouped[dept]) < MAX_PER_DEPARTMENT:
+            grouped[dept].append(e)
+
+    lines = ["🗓 <b>Timetables — latest per department</b>"]
+    for dept in order:
+        group = grouped[dept]
+        # A subtitle repeated identically for every entry of a department is
+        # a page banner, not a per-notice subtitle — drop it.
+        subs = {(e.get("subtitle") or "").strip() for e in grouped[dept]}
+        if len(grouped[dept]) > 1 and len(subs) == 1 and "" not in subs:
+            for e in grouped[dept]:
+                e["subtitle"] = ""
+        lines.append("")
+        lines.append(f"▼ <b>{html.escape(DEPARTMENT_LABELS[dept])}</b>")
+        for e in grouped[dept]:
+            title = html.escape(e["title"])
+            link = f'🔗 <a href="{html.escape(e["url"], quote=True)}">{title}</a>'
+            sub = (e.get("subtitle") or "").strip()
+            if sub:
+                lines.append(f"• {link} — {html.escape(sub)}")
+            else:
+                lines.append(f"• {link}")
+    return "\n".join(lines)
 
 
 class CommandHandler:
@@ -189,12 +246,17 @@ class CommandHandler:
             self._send(chat_id, "\n".join(lines))
             return
 
+        if text == "/schedule":
+            self._send(chat_id, _format_timetables(self.db))
+            return
+
         if text == "/help":
             lines = [
                 "<b>Commands:</b>",
                 f"{DISPLAY_CMDS['/start']} — Subscribe this chat (all departments)",
                 f"{DISPLAY_CMDS['/stop']} — Unsubscribe this chat",
                 f"{DISPLAY_CMDS['/status']} — Your subscription summary",
+                f"{DISPLAY_CMDS['/schedule']} — Latest timetables per department",
                 f"{DISPLAY_CMDS['/departments']} — Your enabled departments",
                 f"{DISPLAY_CMDS['/subscribe']} — Pick which departments you receive",
                 f"{DISPLAY_CMDS['/unsubscribe']} — Same as /subscribe (toggle off)",

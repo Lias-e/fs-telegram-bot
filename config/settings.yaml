@@ -20,6 +20,19 @@ departments:
   https://fsciences.univ-setif.dz/sites_departements/mi: MI_CommonCore
   https://fsciences.univ-setif.dz/sites_departements/sm: SM_CommonCore
 
+llm:
+  enabled: true
+  api_key_env: LLM_API_KEY
+  base_url: https://openrouter.ai/api/v1
+  model: minimax/minimax-m3.1-flash:free
+  fallback_models:
+    - google/gemma-4-26b-a4b-it:free
+    - google/gemma-4-31b-it:free
+  timeout_seconds: 25
+  max_tokens: 500
+  summary_max_chars: 300
+  max_tags: 3
+
 retry:
   max_attempts: 3
   backoff_multiplier: 2
