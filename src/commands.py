@@ -55,68 +55,127 @@ REPLY_KEYBOARD = {
 
 
 MAX_PER_DEPARTMENT = 4
+TT_LIST_LIMIT = 6
 BIND_PREFIX = "bind"
 
 
-def _format_timetables(db):
-    """
-    Latest "Emplois du temps" notices grouped by department, from the index
-    that the poll job refreshes after every scrape.
-    """
+def _timetable_entries(db):
+    """Parsed timetable index from the poll-refreshed cache."""
     raw = db.get_setting("timetable_index", "[]")
     try:
         entries = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        entries = []
-    entries = [e for e in entries if isinstance(e, dict) and e.get("url") and e.get("title")]
-    if not entries:
-        return (
-            "🗓 <b>Timetables</b>\n\n"
-            "No timetable announcements found yet. They will appear here as "
-            "soon as the site publishes any."
-        )
+        return []
+    return [e for e in entries if isinstance(e, dict) and e.get("url") and e.get("title")]
 
-    grouped = {}
+
+def _timetable_dept_buttons(db):
+    """Inline keyboard: one button per department that has timetable notices."""
+    entries = _timetable_entries(db)
+    counts = {}
     order = []
     for e in entries:
         dept = e.get("source") or list(DEPARTMENT_LABELS)[0]
         if dept not in DEPARTMENT_LABELS:
             dept = list(DEPARTMENT_LABELS)[0]
-        if dept not in grouped:
-            grouped[dept] = []
+        if dept not in counts:
+            counts[dept] = 0
             order.append(dept)
-        if len(grouped[dept]) < MAX_PER_DEPARTMENT:
-            grouped[dept].append(e)
-
-    lines = ["🗓 <b>Timetables — latest per department</b>"]
+        counts[dept] += 1
+    if not order:
+        return None
+    keyboard = []
     for dept in order:
-        group = grouped[dept]
-        # A subtitle repeated identically for every entry of a department is
-        # a page banner, not a per-notice subtitle — drop it.
-        subs = {(e.get("subtitle") or "").strip() for e in grouped[dept]}
-        if len(grouped[dept]) > 1 and len(subs) == 1 and "" not in subs:
-            for e in grouped[dept]:
-                e["subtitle"] = ""
-        lines.append("")
-        lines.append(f"▼ <b>{html.escape(DEPARTMENT_LABELS[dept])}</b>")
-        for e in grouped[dept]:
-            title = html.escape(e["title"])
-            link = f'🔗 <a href="{html.escape(e["url"], quote=True)}">{title}</a>'
-            sub = (e.get("subtitle") or "").strip()
-            if sub:
-                lines.append(f"• {link} — {html.escape(sub)}")
-            else:
-                lines.append(f"• {link}")
-    return "\n".join(lines)
+        slug = URL_TO_SLUG.get(dept)
+        if not slug:
+            continue
+        label = f"▼ {DEPARTMENT_LABELS[dept]} ({counts[dept]})"
+        keyboard.append([{"text": label, "callback_data": f"ttdept|{slug}"}])
+    return {"inline_keyboard": keyboard}
+
+
+def _timetable_entry_buttons(db, dept_url):
+    """Inline keyboard: timetable entries of one department, plus Back."""
+    group = [e for e in _timetable_entries(db) if e.get("source") == dept_url]
+    # Banner-subtitle heuristic (same dashboard text repeated on every item)
+    subs = {(e.get("subtitle") or "").strip() for e in group}
+    carry_sub = not (len(group) > 1 and len(subs) == 1 and list(subs)[0] != "")
+    keyboard = []
+    for e in group[:TT_LIST_LIMIT]:
+        notice_id = e["url"].rstrip("/").split("/")[-1]
+        label = e["title"][:60]
+        keyboard.append([{"text": f"📄 {label}", "callback_data": f"ttsend|{notice_id}"}])
+    if group:
+        keyboard.append([{"text": "« Departments", "callback_data": "ttback"}])
+    return {
+        "inline_keyboard": keyboard,
+        "count": len(group),
+        "carry_subtitles": carry_sub,
+    }
 
 
 class CommandHandler:
-    def __init__(self, token, db, targets, admin_id=None):
+    def __init__(self, token, db, targets, admin_id=None, broadcaster=None):
         self.token = token
         self.db = db
         self.targets = targets
         self.admin_id = admin_id
+        self.broadcaster = broadcaster
         self._offset = 0
+        self._scraper = None
+
+    def _get_scraper(self):
+        if self._scraper is None:
+            from src.config import load_selectors, load_settings
+            from src.scraper import Scraper
+            self._scraper = Scraper(load_selectors(), load_settings())
+        return self._scraper
+
+    def _send_timetable_file(self, targets_url_or_id, chat_id, thread_id):
+        """Look up a timetable notice by id, download its attachments and
+        send them (up to 3) as real files into the chat/topic."""
+        from src.scraper import MAX_ATTACHMENTS_PER_NOTICE
+
+        if not self.broadcaster:
+            self._send(chat_id, "File sending is not configured.", thread_id=thread_id)
+            return
+
+        entries = _timetable_entries(self.db)
+        entry = next((e for e in entries if e["url"].rstrip("/").endswith(targets_url_or_id)), None)
+        if not entry:
+            self._send(chat_id, "That timetable entry is no longer available (index refreshed).", thread_id=thread_id)
+            return
+
+        scraper = self._get_scraper()
+        detail = scraper.fetch_notice_details(entry["url"])
+        attachments = (detail or {}).get("attachments", [])[:MAX_ATTACHMENTS_PER_NOTICE]
+        if not attachments:
+            self._send(
+                chat_id,
+                f"⚠️ No PDF/image found on <a href=\"{html.escape(entry['url'], quote=True)}\">"
+                f"{html.escape(entry['title'])}</a>.",
+                thread_id=thread_id,
+            )
+            return
+        import time
+        import tempfile
+        for attachment in attachments:
+            path = scraper.download_attachment(attachment, tempfile.gettempdir() + "/tt_attachments")
+            if path is None:
+                continue
+            caption = f"📄 <b>{html.escape(entry['title'])}</b>"
+            if entry.get("subtitle"):
+                caption += f"\n📅 {html.escape(entry['subtitle'])}"
+            self.broadcaster.send_file(
+                str(path), attachment["kind"], caption=caption,
+                chat_ids=[(chat_id, thread_id)],
+            )
+            try:
+                import pathlib as _pl
+                _pl.Path(path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            time.sleep(3)
 
     def _send(self, chat_id, text, reply_markup=None, thread_id=None):
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
@@ -283,7 +342,20 @@ class CommandHandler:
             return
 
         if text == "/schedule":
-            self._send(chat_id, _format_timetables(self.db))
+            buttons = _timetable_dept_buttons(self.db)
+            if not buttons:
+                self._send(
+                    chat_id,
+                    "🗓 <b>Timetables</b>\n\n"
+                    "No timetable announcements found yet. They will appear here as "
+                    "soon as the site publishes any.",
+                )
+                return
+            self._send(
+                chat_id,
+                "🗓 <b>Timetables</b>\n\nPick a department to see its latest timetables:",
+                reply_markup=buttons,
+            )
             return
 
         if text == "/bind":
@@ -315,7 +387,7 @@ class CommandHandler:
                 f"{DISPLAY_CMDS['/start']} — Subscribe this chat (all departments)",
                 f"{DISPLAY_CMDS['/stop']} — Unsubscribe this chat",
                 f"{DISPLAY_CMDS['/status']} — Your subscription summary",
-                f"{DISPLAY_CMDS['/schedule']} — Latest timetables per department",
+                f"{DISPLAY_CMDS['/schedule']} — Timetables browser (fetch PDFs)",
                 f"{DISPLAY_CMDS['/departments']} — Your enabled departments",
                 f"{DISPLAY_CMDS['/subscribe']} — Pick which departments you receive",
                 f"{DISPLAY_CMDS['/unsubscribe']} — Same as /subscribe (toggle off)",
@@ -385,6 +457,22 @@ class CommandHandler:
             self._send(chat_id, f"❌ Disabled for this chat: {html.escape(DEPARTMENT_LABELS[matched])}")
             return
 
+    def _edit_text(self, chat_id, message_id, text, inline_keyboard):
+        url = f"https://api.telegram.org/bot{self.token}/editMessageText"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": inline_keyboard},
+        }
+        try:
+            with httpx.Client(timeout=10) as client:
+                resp = client.post(url, json=payload)
+                resp.raise_for_status()
+        except Exception as e:
+            logger.error("Failed to edit message %s: %s", message_id, e)
+
     def _handle_callback(self, callback):
         data = callback.get("data", "")
         cb_id = callback.get("id")
@@ -393,8 +481,54 @@ class CommandHandler:
         user_id = callback.get("from", {}).get("id")
         message_id = msg.get("message_id")
 
-        if not data.startswith("dept|") and not data.startswith(BIND_PREFIX + "|"):
+        if not data.startswith("dept|") and not data.startswith(BIND_PREFIX + "|") \
+                and not data.startswith("tt"):
             self._answer_callback(cb_id, "Unknown action")
+            return
+
+        if data.startswith("ttdept|"):
+            slug = data.replace("ttdept|", "", 1)
+            dept_url = DEPARTMENT_SLUGS.get(slug)
+            if not dept_url:
+                self._answer_callback(cb_id, "Unknown department")
+                return
+            kb = _timetable_entry_buttons(self.db, dept_url)
+            if not kb["count"]:
+                self._answer_callback(cb_id, "Nothing available right now")
+                return
+            label = DEPARTMENT_LABELS.get(dept_url, dept_url)
+            if chat_id and message_id:
+                self._edit_text(
+                    chat_id, message_id,
+                    f"🗓 <b>{html.escape(label)}</b> — timetables\n\n"
+                    "Tap an entry to fetch the file:",
+                    kb["inline_keyboard"],
+                )
+            self._answer_callback(cb_id)
+            return
+
+        if data.startswith("ttsend|"):
+            notice_id = data.replace("ttsend|", "", 1)
+            self._answer_callback(cb_id, "⏳ Fetching the file…")
+            thread_id = msg.get("message_thread_id")
+            self._send_timetable_file(
+                notice_id, chat_id,
+                int(thread_id) if str(thread_id).isdigit() else None,
+            )
+            return
+
+        if data == "ttback":
+            buttons = _timetable_dept_buttons(self.db)
+            if not buttons:
+                self._answer_callback(cb_id, "Nothing available right now")
+                return
+            if chat_id and message_id:
+                self._edit_text(
+                    chat_id, message_id,
+                    "🗓 <b>Timetables</b>\n\nPick a department:",
+                    buttons["inline_keyboard"],
+                )
+            self._answer_callback(cb_id)
             return
 
         if data.startswith(BIND_PREFIX + "|"):

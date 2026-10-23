@@ -345,7 +345,7 @@ def main():
 
     cmd_handler = CommandHandler(
         get_env("TELEGRAM_BOT_TOKEN"), _db, targets,
-        admin_id=admin_id,
+        admin_id=admin_id, broadcaster=broadcaster,
     )
     cmd_thread = threading.Thread(target=cmd_handler.run_forever, daemon=True)
     cmd_thread.start()
