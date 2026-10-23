@@ -151,6 +151,47 @@ class Database:
         """Targets enabled globally (what unconfigured chats receive)."""
         return self.get_enabled_targets(all_targets)
 
+    # ---- Group topic bindings --------------------------------------------- #
+
+    def set_topic_binding(self, chat_id, thread_id, url):
+        """Bind one group topic (thread) to a department. The department is
+        bound to exactly one topic: other bindings to the same URL are removed."""
+        pattern = f"topic_link:{chat_id}:"
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT key FROM settings WHERE key LIKE ? AND value = ?",
+                (pattern + "%", url),
+            ).fetchall()
+            for row in rows:
+                self.conn.execute("DELETE FROM settings WHERE key = ?", (row["key"],))
+            self.conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (pattern + str(thread_id), url),
+            )
+            self.conn.commit()
+
+    def remove_topic_binding(self, chat_id, thread_id):
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM settings WHERE key = ?",
+                (f"topic_link:{chat_id}:{thread_id}",),
+            )
+            self.conn.commit()
+
+    def get_topic_bindings(self, chat_id):
+        """Return {thread_id: target_url} bindings for a chat ({} = plain chat)."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT key, value FROM settings WHERE key LIKE ?",
+                (f"topic_link:{chat_id}:%",),
+            ).fetchall()
+        bindings = {}
+        for row in rows:
+            suffix = row["key"].rsplit(":", 1)[-1]
+            if suffix.isdigit():
+                bindings[suffix] = row["value"]
+        return bindings
+
     def backup(self, backup_dir, retention_days=7):
         backup_path = Path(backup_dir)
         backup_path.mkdir(parents=True, exist_ok=True)

@@ -25,7 +25,18 @@ class Broadcaster:
         self._backoff_min = retry_cfg.get("backoff_min_seconds", 4)
         self._backoff_max = retry_cfg.get("backoff_max_seconds", 60)
 
-    def _post_message(self, text, chat_id):
+    @staticmethod
+    def _normalize_targets(targets):
+        """Accept [(chat_id, thread_id|None), ...] or plain chat ids."""
+        out = []
+        for entry in targets:
+            if isinstance(entry, tuple):
+                out.append(entry)
+            else:
+                out.append((entry, None))
+        return out
+
+    def _post_message(self, text, chat_id, thread_id=None):
         @retry(
             stop=stop_after_attempt(self._max_attempts),
             wait=wait_exponential(
@@ -42,6 +53,8 @@ class Broadcaster:
                 "text": text,
                 "parse_mode": "HTML",
             }
+            if thread_id:
+                payload["message_thread_id"] = thread_id
             with httpx.Client(timeout=30) as client:
                 resp = client.post(url, json=payload)
                 resp.raise_for_status()
@@ -49,7 +62,7 @@ class Broadcaster:
 
         return _do_post()
 
-    def _post_file(self, file_path, kind, caption, chat_id):
+    def _post_file(self, file_path, kind, caption, chat_id, thread_id=None):
         @retry(
             stop=stop_after_attempt(self._max_attempts),
             wait=wait_exponential(
@@ -65,11 +78,14 @@ class Broadcaster:
             )
             method = "photo" if kind == "photo" else "document"
             cap = (caption or "")[: PHOTO_CAPTION_LIMIT if kind == "photo" else DOCUMENT_CAPTION_LIMIT]
+            data = {"chat_id": chat_id, "caption": cap, "parse_mode": "HTML"}
+            if thread_id:
+                data["message_thread_id"] = thread_id
             with httpx.Client(timeout=120) as client:
                 with open(file_path, "rb") as fh:
                     resp = client.post(
                         url,
-                        data={"chat_id": chat_id, "caption": cap, "parse_mode": "HTML"},
+                        data=data,
                         files={method: (Path(file_path).name, fh)},
                     )
                 resp.raise_for_status()
@@ -78,26 +94,26 @@ class Broadcaster:
         return _do_post()
 
     def send_file(self, file_path, kind, caption="", chat_ids=None):
-        """Send a local file (photo or document) to the given chats."""
-        if chat_ids is None:
-            chat_ids = [self.default_chat_id]
+        """Send a local file (photo or document) to the given target chats.
+        chat_ids entries may be (chat_id, message_thread_id) tuples."""
+        entries = self._normalize_targets(chat_ids if chat_ids is not None else [self.default_chat_id])
         ok_all = True
-        for chat_id in chat_ids:
+        for chat_id, thread_id in entries:
             try:
-                self._post_file(file_path, kind, caption, chat_id)
+                self._post_file(file_path, kind, caption, chat_id, thread_id)
             except Exception as e:
                 logger.error("Failed to send file to %s: %s", chat_id, e)
                 ok_all = False
         return ok_all
 
-    def _send_to_chat(self, text, chat_id):
+    def _send_to_chat(self, text, chat_id, thread_id=None):
         """Send all parts to one chat. Returns True if every part succeeded."""
         parts = split_text(text, self.max_length)
         for i, part in enumerate(parts):
             try:
                 if i > 0:
                     time.sleep(3)
-                self._post_message(part, chat_id)
+                self._post_message(part, chat_id, thread_id)
                 if chat_id == self.default_chat_id:
                     logger.info("Sent message part %d/%d to default channel", i + 1, len(parts))
             except Exception as e:
@@ -107,19 +123,16 @@ class Broadcaster:
 
     def send(self, text, chat_ids=None):
         """
-        Send text to chats. Returns True if the default/primary chat succeeded.
-        When chat_ids is provided, success is judged by TELEGRAM_CHANNEL_ID
-        (or the first id if the default is not in the list). Subscriber failures
-        are logged but do not fail the overall send for recording purposes.
+        Send text to chats. Entries may be (chat_id, message_thread_id) tuples
+        for group topics. Success is judged by TELEGRAM_CHANNEL_ID.
+        Subscriber failures are logged but do not fail the overall send.
         """
-        if chat_ids is None:
-            chat_ids = [self.default_chat_id]
-
-        primary = self.default_chat_id if self.default_chat_id in chat_ids else chat_ids[0]
+        entries = self._normalize_targets(chat_ids if chat_ids is not None else [self.default_chat_id])
+        primary_chat = self.default_chat_id if self.default_chat_id in [e[0] for e in entries] else entries[0][0]
         primary_ok = False
-        for chat_id in chat_ids:
-            ok = self._send_to_chat(text, chat_id)
-            if chat_id == primary:
+        for chat_id, thread_id in entries:
+            ok = self._send_to_chat(text, chat_id, thread_id)
+            if chat_id == primary_chat:
                 primary_ok = ok
         return primary_ok
 

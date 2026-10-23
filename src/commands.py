@@ -39,6 +39,7 @@ DISPLAY_CMDS = {
     "/help": "❓ Help",
     "/subscribe": "✅ Subscribe",
     "/unsubscribe": "❌ Unsubscribe",
+    "/bind": "🔗 Bind Topic",
 }
 
 DISPLAY_TO_CMD = {v: k for k, v in DISPLAY_CMDS.items()}
@@ -54,6 +55,7 @@ REPLY_KEYBOARD = {
 
 
 MAX_PER_DEPARTMENT = 4
+BIND_PREFIX = "bind"
 
 
 def _format_timetables(db):
@@ -116,11 +118,13 @@ class CommandHandler:
         self.admin_id = admin_id
         self._offset = 0
 
-    def _send(self, chat_id, text, reply_markup=None):
+    def _send(self, chat_id, text, reply_markup=None, thread_id=None):
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         if reply_markup:
             payload["reply_markup"] = reply_markup
+        if thread_id:
+            payload["message_thread_id"] = thread_id
         try:
             with httpx.Client(timeout=10) as client:
                 resp = client.post(url, json=payload)
@@ -138,11 +142,18 @@ class CommandHandler:
         except Exception as e:
             logger.error("Failed to answer callback: %s", e)
 
-    def _build_dept_keyboard(self, chat_id):
-        """Inline keyboard reflecting THIS chat's department selection."""
-        selection = self.db.get_chat_targets(chat_id)
-        if selection is None:
-            selection = self._default_enabled()
+    def _build_dept_keyboard(self, chat_id, thread_id=None, for_bind=False):
+        """
+        Inline keyboard either for a chat's own subscription toggles or,
+        for_bind=True, for binding THIS topic to a department.
+        """
+        bindings = self.db.get_topic_bindings(chat_id) if for_bind else {}
+        if for_bind:
+            selection = []
+        else:
+            selection = self.db.get_chat_targets(chat_id)
+            if selection is None:
+                selection = self._default_enabled()
         enabled = set(selection)
         inline_keyboard = []
         for url, label in DEPARTMENT_LABELS.items():
@@ -150,9 +161,21 @@ class CommandHandler:
                 slug = URL_TO_SLUG.get(url)
                 if not slug:
                     continue
-                status = "✅" if url in enabled else "❌"
-                callback_data = f"dept|{slug}"
-                inline_keyboard.append([{"text": f"{status} {label}", "callback_data": callback_data}])
+                if for_bind:
+                    bound_thread = next(
+                        (t for t, u in bindings.items() if u == url), None
+                    )
+                    if bound_thread is not None and str(bound_thread) == str(thread_id):
+                        marker = "🔗"
+                    elif bound_thread is not None:
+                        marker = "•"
+                    else:
+                        marker = "➕"
+                    callback_data = f"{BIND_PREFIX}|{thread_id}|{slug}"
+                else:
+                    marker = "✅" if url in enabled else "❌"
+                    callback_data = f"dept|{slug}"
+                inline_keyboard.append([{"text": f"{marker} {label}", "callback_data": callback_data}])
         return {"inline_keyboard": inline_keyboard}
 
     def _default_enabled(self):
@@ -175,12 +198,12 @@ class CommandHandler:
         self.db.set_chat_targets(chat_id, selection)
         return url in selection
 
-    def _edit_keyboard(self, chat_id, message_id):
+    def _edit_keyboard(self, chat_id, message_id, for_bind=False, thread_id=None):
         url = f"https://api.telegram.org/bot{self.token}/editMessageReplyMarkup"
         payload = {
             "chat_id": chat_id,
             "message_id": message_id,
-            "reply_markup": self._build_dept_keyboard(chat_id),
+            "reply_markup": self._build_dept_keyboard(chat_id, thread_id, for_bind),
         }
         try:
             with httpx.Client(timeout=10) as client:
@@ -203,11 +226,24 @@ class CommandHandler:
             logger.error("deleteWebhook failed: %s", e)
 
     def _handle(self, msg):
-        chat_id = str(msg.get("chat", {}).get("id", ""))
+        chat = msg.get("chat", {})
+        chat_id = str(chat.get("id", ""))
         user_id = msg.get("from", {}).get("id")
         text = (msg.get("text") or "").strip()
         if not text or not chat_id:
             return
+
+        # Remember when a subscribed chat is a forum group — broadcasts then
+        # require a bound topic instead of a plain send.
+        if chat.get("is_forum"):
+            if not self.db.get_setting(f"is_forum:{chat_id}"):
+                self.db.set_setting(f"is_forum:{chat_id}", "1")
+
+        if not self._is_admin(user_id):
+            # Non-admins can still use subscription commands, but topic
+            # binding stays admin-only.
+            if text not in DISPLAY_TO_CMD and not text.startswith("/"):
+                return
 
         text = DISPLAY_TO_CMD.get(text, text)
 
@@ -250,6 +286,29 @@ class CommandHandler:
             self._send(chat_id, _format_timetables(self.db))
             return
 
+        if text == "/bind":
+            thread_id = msg.get("message_thread_id")
+            if not thread_id:
+                self._send(
+                    chat_id,
+                    "🔗 <b>Bind Topic</b>\n\nOpen a group with Topics enabled, "
+                    "then run <code>/bind</code> inside the topic you want to "
+                    "link to a department.",
+                )
+                return
+            if not self._is_admin(user_id):
+                self._send(chat_id, "Only the admin can bind topics.", thread_id=thread_id)
+                return
+            self._send(
+                chat_id,
+                "Tap the department this topic should receive:",
+                reply_markup=self._build_dept_keyboard(
+                    chat_id, thread_id=str(thread_id), for_bind=True
+                ),
+                thread_id=thread_id,
+            )
+            return
+
         if text == "/help":
             lines = [
                 "<b>Commands:</b>",
@@ -260,6 +319,7 @@ class CommandHandler:
                 f"{DISPLAY_CMDS['/departments']} — Your enabled departments",
                 f"{DISPLAY_CMDS['/subscribe']} — Pick which departments you receive",
                 f"{DISPLAY_CMDS['/unsubscribe']} — Same as /subscribe (toggle off)",
+                f"{DISPLAY_CMDS['/bind']} — Admin: link a group topic to a department",
                 f"{DISPLAY_CMDS['/help']} — This message",
             ]
             self._send(chat_id, "\n".join(lines))
@@ -333,8 +393,32 @@ class CommandHandler:
         user_id = callback.get("from", {}).get("id")
         message_id = msg.get("message_id")
 
-        if not data.startswith("dept|"):
+        if not data.startswith("dept|") and not data.startswith(BIND_PREFIX + "|"):
             self._answer_callback(cb_id, "Unknown action")
+            return
+
+        if data.startswith(BIND_PREFIX + "|"):
+            if not self._is_admin(user_id):
+                self._answer_callback(cb_id, "Only the admin can bind topics", show_alert=True)
+                return
+            _, thread_id, slug = data.split("|", 2)
+            url = DEPARTMENT_SLUGS.get(slug)
+            if not url or not str(thread_id).isdigit():
+                self._answer_callback(cb_id, "Unknown department")
+                return
+            current = self.db.get_topic_bindings(chat_id)
+            if current.get(str(thread_id)) == url:
+                self.db.remove_topic_binding(chat_id, thread_id)
+                action = "🔓 Unbound"
+            else:
+                self.db.set_topic_binding(chat_id, thread_id, url)
+                action = "🔗 Bound"
+            self._answer_callback(
+                cb_id,
+                f"{action}: {DEPARTMENT_LABELS.get(url, url)}",
+            )
+            if chat_id and message_id:
+                self._edit_keyboard(chat_id, message_id, for_bind=True, thread_id=thread_id)
             return
 
         # The tap is only honoured if it comes from the same chat the keyboard

@@ -166,16 +166,35 @@ def poll_job(db, broadcaster, settings, selectors, enhancer=None):
             dup_count += 1
             continue
         source = notice.get("source", "")
-        # Per-chat department filtering: chats with no explicit selection
-        # receive everything; chats with a selection only matching targets.
+        # Per-chat routing: plain chats get the notice if they have no explicit
+        # selection or the source matches; forum groups get it only in the
+        # topic bound to that department (bindings dict topic->url).
         chat_ids = []
         if default_chat:
-            chat_ids.append(default_chat)
+            chat_ids.append((default_chat, None))
         for sub in subs:
             chat_id = sub["chat_id"]
             selection = db.get_chat_targets(chat_id)
-            if selection is None or source in selection:
-                chat_ids.append(chat_id)
+            if selection is not None and source not in selection:
+                continue
+            bindings = db.get_topic_bindings(chat_id)
+            if db.get_setting(f"is_forum:{chat_id}") == "1":
+                matching = next(
+                    (int(t) for t, u in bindings.items() if u == source), None
+                )
+                if matching is not None:
+                    chat_ids.append((chat_id, matching))
+                    logger.info(
+                        "Routing %s to forum chat %s topic %d", url, chat_id, matching
+                    )
+                elif not bindings:
+                    logger.warning(
+                        "Chat %s is a forum group with no topic bindings — "
+                        "run /bind inside each topic; skipping for %s",
+                        chat_id, url,
+                    )
+                continue
+            chat_ids.append((chat_id, None))
         if not chat_ids:
             logger.info("No subscriber wants %s (%s) — recording only", url, notice.get("department"))
             ok = True
