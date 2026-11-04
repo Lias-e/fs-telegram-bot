@@ -15,11 +15,62 @@ READ_MORE_TEXTS = {"قراءة المزيد", "lire la suite", "read more"}
 MAX_ATTACHMENT_BYTES = 40 * 1024 * 1024  # Telegram bot API document limit is 50 MB
 MAX_ATTACHMENTS_PER_NOTICE = 3
 
+DESKTOP_BROWSERS = [
+    # (platform string for Sec-CH-UA-Platform, full Chrome UA)
+    ("\"Windows\"",
+     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    ("\"macOS\"",
+     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+     "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"),
+    ("\"Windows\"",
+     "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 "
+     "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"),
+    ("\"Linux\"",
+     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+     "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"),
+]
+
 
 class Scraper:
     def __init__(self, selectors, settings):
         self.selectors = selectors
         self.settings = settings
+        # One consistent browser fingerprint per Scraper instance (a poll
+        # session) — real users don't switch browser between sub-requests.
+        self._platform, self._user_agent = random.choice(DESKTOP_BROWSERS)
+
+    def _browser_headers(self):
+        """
+        Realistic desktop-Chromium headers: client hints match the UA
+        version, languages fit the DZ audience, fetch metadata looks like
+        a user navigation. Accept-Encoding is intentionally omitted —
+        httpx advertises exactly the codecs it can decode.
+        """
+        major = (re.search(r"Chrome/(\d+)", self._user_agent) or [None, "131"])[1]
+        # "Not/A)Brand" is the GREASE-style placeholder Chromium sends; the
+        # value is noise by design — the UA version is what matters.
+        brands = (
+            f"\"Not/A)Brand\";v=\"8\", \"Chromium\";v=\"{major}\", "
+            f"\"Google Chrome\";v=\"{major}\""
+        )
+        return {
+            "User-Agent": self._user_agent,
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,image/apng,*/*;q=0.8,"
+                "application/signed-exchange;v=b3;q=0.7"
+            ),
+            "Accept-Language": "fr-DZ,fr;q=0.9,ar-DZ,ar;q=0.8,en;q=0.7",
+            "Sec-CH-UA": brands,
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": self._platform,
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+        }
 
     def _random_delay(self):
         delay = random.uniform(
@@ -31,12 +82,11 @@ class Scraper:
     def fetch_page(self, url):
         self._random_delay()
         timeout = self.settings["browser"]["timeout_seconds"]
-        user_agent = random.choice(self.settings["browser"]["user_agents"])
         try:
             with httpx.Client(
                 timeout=timeout,
                 follow_redirects=True,
-                headers={"User-Agent": user_agent},
+                headers=self._browser_headers(),
             ) as client:
                 resp = client.get(url)
                 resp.raise_for_status()
@@ -199,11 +249,21 @@ class Scraper:
         )
         try:
             Path(dest_dir).mkdir(parents=True, exist_ok=True)
-            user_agent = random.choice(self.settings["browser"]["user_agents"])
+            headers = self._browser_headers()
+            # Same click: an embedded document request, not a fresh navigation
+            headers["Sec-Fetch-Site"] = "same-origin"
+            headers.pop("Sec-Fetch-User", None)
+            headers.pop("Upgrade-Insecure-Requests", None)
+            headers["Accept"] = (
+                "application/pdf,application/vnd.ms-excel,application/vnd.ms-powerpoint,"
+                "application/msword,*/*"
+                if kind == "document"
+                else "image/avif,image/webp,image/apng,image/jpeg,image/png,*/*;q=0.8"
+            )
             with httpx.Client(
                 timeout=self.settings["browser"]["timeout_seconds"],
                 follow_redirects=True,
-                headers={"User-Agent": user_agent},
+                headers=headers,
             ) as client:
                 with client.stream("GET", url) as resp:
                     resp.raise_for_status()
