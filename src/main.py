@@ -63,6 +63,23 @@ TIMETABLE_RE = re.compile(
 )
 
 
+def _filter_matches(regex_str, notice):
+    """
+    Test a stored title filter against a notice. Underscores in some site
+    titles ("EMPLOI_DU_TEMPS_...") become spaces. An invalid regex fails
+    open (matches) so a typo never silently drops every notice.
+    """
+    try:
+        pattern = re.compile(regex_str, re.IGNORECASE)
+    except re.error as e:
+        logger.warning("Invalid title filter %r: %s — failing open", regex_str, e)
+        return True
+    text = " ".join(
+        part for part in (notice.get("title"), notice.get("date")) if part
+    ).replace("_", " ")
+    return bool(pattern.search(text))
+
+
 def update_timetable_index(db, notices):
     """
     Refresh the latest "Emplois du temps" index used by the /schedule
@@ -183,6 +200,13 @@ def poll_job(db, broadcaster, settings, selectors, enhancer=None):
                     (int(t) for t, u in bindings.items() if u == source), None
                 )
                 if matching is not None:
+                    topic_filter = db.get_topic_filter(chat_id, str(matching))
+                    if topic_filter and not _filter_matches(topic_filter, notice):
+                        logger.info(
+                            "Topic filter %r excluded %s from chat %s topic %d",
+                            topic_filter, url, chat_id, matching,
+                        )
+                        continue
                     chat_ids.append((chat_id, matching))
                     logger.info(
                         "Routing %s to forum chat %s topic %d", url, chat_id, matching
@@ -193,6 +217,10 @@ def poll_job(db, broadcaster, settings, selectors, enhancer=None):
                         "run /bind inside each topic; skipping for %s",
                         chat_id, url,
                     )
+                continue
+            chat_filter = db.get_chat_filter(chat_id)
+            if chat_filter and not _filter_matches(chat_filter, notice):
+                logger.info("Chat filter %r excluded %s from chat %s", chat_filter, url, chat_id)
                 continue
             chat_ids.append((chat_id, None))
         if not chat_ids:

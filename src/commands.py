@@ -1,6 +1,7 @@
 import html
 import json
 import logging
+import re
 import time
 
 import httpx
@@ -40,6 +41,7 @@ DISPLAY_CMDS = {
     "/subscribe": "✅ Subscribe",
     "/unsubscribe": "❌ Unsubscribe",
     "/bind": "🔗 Bind Topic",
+    "/filter": "🎛 Filter",
 }
 
 DISPLAY_TO_CMD = {v: k for k, v in DISPLAY_CMDS.items()}
@@ -57,6 +59,21 @@ REPLY_KEYBOARD = {
 MAX_PER_DEPARTMENT = 4
 TT_LIST_LIMIT = 6
 BIND_PREFIX = "bind"
+LEVEL_PREFIX = "lvl"
+
+# Optional second tap of the /bind flow: the regex that narrows a bound
+# topic to one level. "all" clears any previous filter.
+LEVEL_OPTIONS = [
+    ("all", "🌐 All levels"),
+    ("licence", "🎓 Licence (L1–L3)"),
+    ("master1", "🎓 Master 1"),
+    ("master2", "🎓 Master 2"),
+]
+LEVEL_REGEX = {
+    "licence": r"\blicence\b|\bl\s*1\b|\bl\s*2\b|\bl\s*3\b",
+    "master1": r"\bmaster\s*1\b|\bm\s*1\b",
+    "master2": r"\bmaster\s*2\b|\bm\s*2\b",
+}
 
 
 def _timetable_entries(db):
@@ -230,12 +247,27 @@ class CommandHandler:
                         marker = "•"
                     else:
                         marker = "➕"
+                    if bound_thread is not None and self.db.get_topic_filter(
+                        chat_id, str(bound_thread)
+                    ):
+                        marker += " ✂"
                     callback_data = f"{BIND_PREFIX}|{thread_id}|{slug}"
                 else:
                     marker = "✅" if url in enabled else "❌"
                     callback_data = f"dept|{slug}"
                 inline_keyboard.append([{"text": f"{marker} {label}", "callback_data": callback_data}])
         return {"inline_keyboard": inline_keyboard}
+
+    def _build_level_keyboard(self, chat_id, thread_id):
+        """Shown right after a topic is bound: narrow it to a level."""
+        keyboard = [
+            [{"text": label, "callback_data": f"{LEVEL_PREFIX}|{thread_id}|{level}"}]
+            for level, label in LEVEL_OPTIONS
+        ]
+        keyboard.append([
+            {"text": "✏ Custom regex (/filter)", "callback_data": f"{LEVEL_PREFIX}hint|{thread_id}"},
+        ])
+        return {"inline_keyboard": keyboard}
 
     def _default_enabled(self):
         return self.db.default_enabled_targets(self.targets)
@@ -338,6 +370,25 @@ class CommandHandler:
             ]
             if labels:
                 lines.append(f"🏷 {html.escape(', '.join(labels))}")
+            thread_id = msg.get("message_thread_id")
+            if self._is_admin(user_id):
+                if thread_id:
+                    tf = self.db.get_topic_filter(chat_id, str(thread_id))
+                    if tf:
+                        lines.append(f"🎛 Topic filter: {html.escape(tf)}")
+                else:
+                    cf = self.db.get_chat_filter(chat_id)
+                    if cf:
+                        lines.append(f"🎛 Chat filter: {html.escape(cf)}")
+                    bindings = self.db.get_topic_bindings(chat_id)
+                    filters = [
+                        f"thread {t} → {DEPARTMENT_LABELS.get(u, u)} ✂"
+                        for t, u in bindings.items()
+                        if self.db.get_topic_filter(chat_id, str(t))
+                    ]
+                    if filters:
+                        lines.append(f"✂ Filtered topics: {len(filters)}")
+                        lines.extend(f"  • {html.escape(f)}" for f in filters)
             self._send(chat_id, "\n".join(lines))
             return
 
@@ -373,10 +424,67 @@ class CommandHandler:
                 return
             self._send(
                 chat_id,
-                "Tap the department this topic should receive:",
+                "Tap the department this topic should receive.\n\n"
+                "After binding, the bot offers level options "
+                "(Master 1, Master 2, …). Custom regexes still work via "
+                "<code>/filter</code>.",
                 reply_markup=self._build_dept_keyboard(
                     chat_id, thread_id=str(thread_id), for_bind=True
                 ),
+                thread_id=thread_id,
+            )
+            return
+
+        if text == "/filter" or text.startswith("/filter "):
+            thread_id = msg.get("message_thread_id")
+            if not self._is_admin(user_id):
+                self._send(chat_id, "Only the admin can set filters.", thread_id=thread_id)
+                return
+            arg = text[len("/filter"):].strip() if text != "/filter" else ""
+            if thread_id:
+                current = self.db.get_topic_filter(chat_id, str(thread_id))
+                scope = "🔹 Applies to the department topic bound in this group."
+            else:
+                current = self.db.get_chat_filter(chat_id)
+                scope = "🔹 Applies to this chat's department subscriptions."
+            if not arg:
+                lines = [
+                    "🎛 <b>Title filter</b> (case-insensitive regex)",
+                    (
+                        f"<code>{html.escape(current)}</code>"
+                        if current
+                        else "<i>No filter set — this chat/topic receives every notice.</i>"
+                    ),
+                    "",
+                    scope,
+                    "Usage: <code>/filter master1|M1</code>",
+                    "Remove: <code>/filter clear</code>",
+                ]
+                self._send(chat_id, "\n".join(lines), thread_id=thread_id)
+                return
+            if arg.lower() in ("clear", "off", "reset", "none"):
+                if thread_id:
+                    self.db.remove_topic_filter(chat_id, str(thread_id))
+                else:
+                    self.db.remove_chat_filter(chat_id)
+                self._send(chat_id, "🎛 Filter removed.", thread_id=thread_id)
+                return
+            try:
+                re.compile(arg, re.IGNORECASE)
+            except re.error as e:
+                self._send(
+                    chat_id,
+                    f"⚠️ Invalid regex: {html.escape(str(e))}",
+                    thread_id=thread_id,
+                )
+                return
+            if thread_id:
+                self.db.set_topic_filter(chat_id, str(thread_id), arg)
+            else:
+                self.db.set_chat_filter(chat_id, arg)
+            self._send(
+                chat_id,
+                "🎛 Filter set: <code>" + html.escape(arg) + "</code>\n" + scope,
                 thread_id=thread_id,
             )
             return
@@ -391,7 +499,8 @@ class CommandHandler:
                 f"{DISPLAY_CMDS['/departments']} — Your enabled departments",
                 f"{DISPLAY_CMDS['/subscribe']} — Pick which departments you receive",
                 f"{DISPLAY_CMDS['/unsubscribe']} — Same as /subscribe (toggle off)",
-                f"{DISPLAY_CMDS['/bind']} — Admin: link a group topic to a department",
+                f"{DISPLAY_CMDS['/bind']} — Admin: link a topic to a department (level options)",
+                f"{DISPLAY_CMDS['/filter']} — Admin: keep only title-matching notices",
                 f"{DISPLAY_CMDS['/help']} — This message",
             ]
             self._send(chat_id, "\n".join(lines))
@@ -482,7 +591,7 @@ class CommandHandler:
         message_id = msg.get("message_id")
 
         if not data.startswith("dept|") and not data.startswith(BIND_PREFIX + "|") \
-                and not data.startswith("tt"):
+                and not data.startswith("tt") and not data.startswith(LEVEL_PREFIX):
             self._answer_callback(cb_id, "Unknown action")
             return
 
@@ -543,14 +652,55 @@ class CommandHandler:
             current = self.db.get_topic_bindings(chat_id)
             if current.get(str(thread_id)) == url:
                 self.db.remove_topic_binding(chat_id, thread_id)
-                action = "🔓 Unbound"
+                self.db.remove_topic_filter(chat_id, str(thread_id))
+                self._answer_callback(cb_id, f"🔓 Unbound: {DEPARTMENT_LABELS.get(url, url)}")
+                if chat_id and message_id:
+                    self._edit_keyboard(chat_id, message_id, for_bind=True, thread_id=thread_id)
             else:
                 self.db.set_topic_binding(chat_id, thread_id, url)
-                action = "🔗 Bound"
-            self._answer_callback(
-                cb_id,
-                f"{action}: {DEPARTMENT_LABELS.get(url, url)}",
-            )
+                label = DEPARTMENT_LABELS.get(url, url)
+                self._answer_callback(cb_id, f"🔗 Bound: {label}")
+                if chat_id and message_id:
+                    self._edit_text(
+                        chat_id, message_id,
+                        f"🔗 <b>{html.escape(label)}</b> bound to this topic.\n\n"
+                        "Optional: narrow it to one level:",
+                        self._build_level_keyboard(chat_id, str(thread_id))["inline_keyboard"],
+                    )
+            return
+
+        if data.startswith(LEVEL_PREFIX + "hint|"):
+            if self._is_admin(user_id):
+                self._answer_callback(
+                    cb_id,
+                    "Run /filter <regex> inside this topic "
+                    "(e.g. /filter MBD|MIAGE).",
+                    show_alert=True,
+                )
+            else:
+                self._answer_callback(cb_id, "Only the admin can set filters", show_alert=True)
+            return
+
+        if data.startswith(LEVEL_PREFIX + "|"):
+            if not self._is_admin(user_id):
+                self._answer_callback(cb_id, "Only the admin can set levels", show_alert=True)
+                return
+            _, thread_id, level = data.split("|", 2)
+            if not str(thread_id).isdigit():
+                self._answer_callback(cb_id, "Unknown topic")
+                return
+            if level == "all":
+                self.db.remove_topic_filter(chat_id, str(thread_id))
+                self._answer_callback(cb_id, "🌐 All levels")
+            else:
+                regex = LEVEL_REGEX.get(level)
+                if not regex:
+                    self._answer_callback(cb_id, "Unknown level")
+                    return
+                self.db.set_topic_filter(chat_id, str(thread_id), regex)
+                self._answer_callback(
+                    cb_id, "🎛 " + dict(LEVEL_OPTIONS).get(level, level)
+                )
             if chat_id and message_id:
                 self._edit_keyboard(chat_id, message_id, for_bind=True, thread_id=thread_id)
             return

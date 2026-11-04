@@ -69,6 +69,22 @@ def test_settings():
         db.close()
 
 
+def test_filters():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _make_db(tmp)
+        db.set_topic_filter("77", "42", r"master\s*1\b|\bm\s*1\b")
+        db.set_chat_filter("88", "M1")
+        assert db.get_topic_filter("77", "42") == r"master\s*1\b|\bm\s*1\b"
+        assert db.get_chat_filter("88") == "M1"
+        assert db.get_topic_filter("88", "42") is None
+        assert db.get_chat_filter("77") is None
+        db.remove_topic_filter("77", "42")
+        db.remove_chat_filter("88")
+        assert db.get_topic_filter("77", "42") is None
+        assert db.get_chat_filter("88") is None
+        db.close()
+
+
 def test_enabled_targets():
     with tempfile.TemporaryDirectory() as tmp:
         db = _make_db(tmp)

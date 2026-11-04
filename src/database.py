@@ -151,6 +151,37 @@ class Database:
         """Targets enabled globally (what unconfigured chats receive)."""
         return self.get_enabled_targets(all_targets)
 
+    # ---- Title filters (per chat or per bound topic) ----------------------- #
+
+    def set_topic_filter(self, chat_id, thread_id, regex):
+        """Case-insensitive title regex; only matching notices reach the topic."""
+        self.set_setting(f"topic_filter:{chat_id}:{thread_id}", regex)
+
+    def remove_topic_filter(self, chat_id, thread_id):
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM settings WHERE key = ?",
+                (f"topic_filter:{chat_id}:{thread_id}",),
+            )
+            self.conn.commit()
+
+    def get_topic_filter(self, chat_id, thread_id):
+        return self.get_setting(f"topic_filter:{chat_id}:{thread_id}")
+
+    def set_chat_filter(self, chat_id, regex):
+        self.set_setting(f"chat_filter:{chat_id}", regex)
+
+    def remove_chat_filter(self, chat_id):
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM settings WHERE key = ?",
+                (f"chat_filter:{chat_id}",),
+            )
+            self.conn.commit()
+
+    def get_chat_filter(self, chat_id):
+        return self.get_setting(f"chat_filter:{chat_id}")
+
     # ---- Group topic bindings --------------------------------------------- #
 
     def set_topic_binding(self, chat_id, thread_id, url):
