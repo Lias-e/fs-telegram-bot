@@ -12,11 +12,7 @@ logger = logging.getLogger(__name__)
 DEPARTMENT_SLUGS = {
     "main": "https://fsciences.univ-setif.dz",
     "informatique": "https://fsciences.univ-setif.dz/sites_departements/informatique",
-    "maths": "https://fsciences.univ-setif.dz/sites_departements/maths",
-    "physique": "https://fsciences.univ-setif.dz/sites_departements/physique",
-    "chimie": "https://fsciences.univ-setif.dz/sites_departements/chimie",
     "mi": "https://fsciences.univ-setif.dz/sites_departements/mi",
-    "sm": "https://fsciences.univ-setif.dz/sites_departements/sm",
 }
 
 URL_TO_SLUG = {url: slug for slug, url in DEPARTMENT_SLUGS.items()}
@@ -24,11 +20,7 @@ URL_TO_SLUG = {url: slug for slug, url in DEPARTMENT_SLUGS.items()}
 DEPARTMENT_LABELS = {
     "https://fsciences.univ-setif.dz": "Faculty (main)",
     "https://fsciences.univ-setif.dz/sites_departements/informatique": "Computer Science",
-    "https://fsciences.univ-setif.dz/sites_departements/maths": "Mathematics",
-    "https://fsciences.univ-setif.dz/sites_departements/physique": "Physics",
-    "https://fsciences.univ-setif.dz/sites_departements/chimie": "Chemistry",
     "https://fsciences.univ-setif.dz/sites_departements/mi": "MI (Math-Info)",
-    "https://fsciences.univ-setif.dz/sites_departements/sm": "SM (Material Sci.)",
 }
 
 DISPLAY_CMDS = {

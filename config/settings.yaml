@@ -5,20 +5,12 @@ poll:
   targets:
     - https://fsciences.univ-setif.dz
     - https://fsciences.univ-setif.dz/sites_departements/informatique
-    - https://fsciences.univ-setif.dz/sites_departements/maths
-    - https://fsciences.univ-setif.dz/sites_departements/physique
-    - https://fsciences.univ-setif.dz/sites_departements/chimie
     - https://fsciences.univ-setif.dz/sites_departements/mi
-    - https://fsciences.univ-setif.dz/sites_departements/sm
 
 departments:
   https://fsciences.univ-setif.dz: General
   https://fsciences.univ-setif.dz/sites_departements/informatique: Computer_Science
-  https://fsciences.univ-setif.dz/sites_departements/maths: Mathematics
-  https://fsciences.univ-setif.dz/sites_departements/physique: Physics
-  https://fsciences.univ-setif.dz/sites_departements/chimie: Chemistry
   https://fsciences.univ-setif.dz/sites_departements/mi: MI_CommonCore
-  https://fsciences.univ-setif.dz/sites_departements/sm: SM_CommonCore
 
 llm:
   enabled: true
