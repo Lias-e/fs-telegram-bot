@@ -6,6 +6,8 @@ import time
 
 import httpx
 
+from src.config import get_env
+
 logger = logging.getLogger(__name__)
 
 # Short slugs for Telegram callback_data (must stay ≤ 64 bytes with "dept|" prefix)
@@ -308,6 +310,17 @@ class CommandHandler:
         except Exception as e:
             logger.error("deleteWebhook failed: %s", e)
 
+    def _private_notice(self):
+        url = (get_env("TELEGRAM_CHANNEL_URL") or "").strip()
+        text = (
+            "⚠️ <b>Private chats are no longer supported.</b>\n\n"
+            "This bot no longer sends announcements in private chats.\n\n"
+            "📢 Please subscribe to the main channel instead:"
+        )
+        if url:
+            text += f"\n{url}"
+        return text
+
     def _handle(self, msg):
         chat = msg.get("chat", {})
         chat_id = str(chat.get("id", ""))
@@ -322,13 +335,18 @@ class CommandHandler:
             if not self.db.get_setting(f"is_forum:{chat_id}"):
                 self.db.set_setting(f"is_forum:{chat_id}", "1")
 
-        if not self._is_admin(user_id):
-            # Non-admins can still use subscription commands, but topic
-            # binding stays admin-only.
-            if text not in DISPLAY_TO_CMD and not text.startswith("/"):
-                return
-
         text = DISPLAY_TO_CMD.get(text, text)
+
+        # Only the admin can operate the bot. Private chats are no longer
+        # supported for subscriptions at all — anyone who tries is pointed
+        # to the main channel.
+        if chat.get("type") == "private":
+            if text.startswith("/") or text in DISPLAY_TO_CMD:
+                self._send(chat_id, self._private_notice())
+            return
+
+        if not self._is_admin(user_id):
+            return
 
         if text == "/start":
             self.db.add_subscription(chat_id, msg.get("chat", {}).get("title", ""))

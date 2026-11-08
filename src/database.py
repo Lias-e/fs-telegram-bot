@@ -122,6 +122,18 @@ class Database:
             )
             self.conn.commit()
 
+    def remove_setting(self, key):
+        with self._lock:
+            self.conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+            self.conn.commit()
+
+    def remove_chat_target_settings(self, chat_id):
+        """Remove a chat's per-chat department/filter settings (used when a
+        subscriber is purged). Topic bindings are left untouched — private
+        chats never have them."""
+        for prefix in ("chat_targets:", "chat_filter:"):
+            self.remove_setting(f"{prefix}{chat_id}")
+
     def get_enabled_targets(self, all_targets):
         """Targets enabled globally. Always returns a fresh copy (callers
         toggle against it) so the original list is never mutated."""
