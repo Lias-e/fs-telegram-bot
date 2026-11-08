@@ -236,9 +236,12 @@ class Scraper:
 
     def download_attachment(self, attachment, dest_dir):
         """
-        Download an attachment to dest_dir. Returns the local Path on success,
-        None otherwise. Caps download size and filters by response
-        Content-Type to avoid saving HTML error pages as files.
+        Download an attachment to dest_dir, retrying a few times because the
+        source server often stalls mid-stream (read timeouts). A retry usually
+        succeeds immediately, which keeps the description + PDF captioned in
+        one message instead of two. Returns the local Path on success, None
+        otherwise. Caps download size and filters by response Content-Type to
+        avoid saving HTML error pages as files.
         """
         url = attachment["url"]
         kind = attachment["kind"]
@@ -247,43 +250,58 @@ class Scraper:
             {"application/pdf"} if kind == "document"
             else {"image/jpeg", "image/png", "image/webp"}
         )
-        try:
-            Path(dest_dir).mkdir(parents=True, exist_ok=True)
-            headers = self._browser_headers()
-            # Same click: an embedded document request, not a fresh navigation
-            headers["Sec-Fetch-Site"] = "same-origin"
-            headers.pop("Sec-Fetch-User", None)
-            headers.pop("Upgrade-Insecure-Requests", None)
-            headers["Accept"] = (
-                "application/pdf,application/vnd.ms-excel,application/vnd.ms-powerpoint,"
-                "application/msword,*/*"
-                if kind == "document"
-                else "image/avif,image/webp,image/apng,image/jpeg,image/png,*/*;q=0.8"
-            )
-            with httpx.Client(
-                timeout=self.settings["browser"]["timeout_seconds"],
-                follow_redirects=True,
-                headers=headers,
-            ) as client:
-                with client.stream("GET", url) as resp:
-                    resp.raise_for_status()
-                    ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-                    if ctype and ctype not in allowed_content:
-                        logger.warning("Unexpected content-type %s for %s", ctype, url)
-                        return None
-                    target = Path(dest_dir, filename)
-                    wrote = 0
-                    with open(target, "wb") as fh:
-                        for chunk in resp.iter_bytes(65536):
-                            wrote += len(chunk)
-                            if wrote > MAX_ATTACHMENT_BYTES:
-                                logger.warning("Attachment too large: %s", url)
-                                fh.close()
-                                target.unlink(missing_ok=True)
-                                return None
-                            fh.write(chunk)
-            logger.info("Downloaded attachment %s (%d bytes)", target.name, wrote)
-            return target
-        except Exception as e:
-            logger.error("Attachment download failed for %s: %s", url, e)
-            return None
+        browser_cfg = self.settings["browser"]
+        # Attachments (especially PDFs) stream slowly from the source host;
+        # allow a longer read timeout than page fetches.
+        timeout = browser_cfg.get("attachment_timeout_seconds", 120)
+        max_attempts = browser_cfg.get("attachment_download_attempts", 3)
+        for attempt in range(1, max_attempts + 1):
+            target = Path(dest_dir, filename)
+            try:
+                Path(dest_dir).mkdir(parents=True, exist_ok=True)
+                headers = self._browser_headers()
+                # Same click: an embedded document request, not a fresh navigation
+                headers["Sec-Fetch-Site"] = "same-origin"
+                headers.pop("Sec-Fetch-User", None)
+                headers.pop("Upgrade-Insecure-Requests", None)
+                headers["Accept"] = (
+                    "application/pdf,application/vnd.ms-excel,application/vnd.ms-powerpoint,"
+                    "application/msword,*/*"
+                    if kind == "document"
+                    else "image/avif,image/webp,image/apng,image/jpeg,image/png,*/*;q=0.8"
+                )
+                with httpx.Client(
+                    timeout=timeout,
+                    follow_redirects=True,
+                    headers=headers,
+                ) as client:
+                    with client.stream("GET", url) as resp:
+                        resp.raise_for_status()
+                        ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                        if ctype and ctype not in allowed_content:
+                            logger.warning("Unexpected content-type %s for %s", ctype, url)
+                            return None
+                        wrote = 0
+                        with open(target, "wb") as fh:
+                            for chunk in resp.iter_bytes(65536):
+                                wrote += len(chunk)
+                                if wrote > MAX_ATTACHMENT_BYTES:
+                                    logger.warning("Attachment too large: %s", url)
+                                    fh.close()
+                                    target.unlink(missing_ok=True)
+                                    return None
+                                fh.write(chunk)
+                logger.info("Downloaded attachment %s (%d bytes)", target.name, wrote)
+                return target
+            except Exception as e:
+                # A partial download may have been left behind — clean it up
+                # before deciding whether to retry.
+                target.unlink(missing_ok=True)
+                logger.error(
+                    "Attachment download failed (attempt %d/%d) for %s: %s",
+                    attempt, max_attempts, url, e,
+                )
+                if attempt < max_attempts:
+                    wait = min(5 * 2 ** (attempt - 1), 30)
+                    time.sleep(wait)
+        return None

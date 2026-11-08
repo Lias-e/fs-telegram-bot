@@ -47,6 +47,12 @@ heartbeat:
 
 browser:
   timeout_seconds: 30
+  # Attachments (PDFs/images) stream slowly from the source host, so they get
+  # a longer read timeout and a short retry loop. Retrying quickly is what
+  # keeps the description captioned on the PDF instead of sent as a separate
+  # text message (see main.py fallback).
+  attachment_timeout_seconds: 120
+  attachment_download_attempts: 3
   random_delay_min: 2
   random_delay_max: 5
   # Kept for reference/override; Scraper v2 picks a consistent fingerprint
